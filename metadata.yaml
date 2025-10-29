@@ -3,4 +3,4 @@ display_name: Magnet Previewer # 用于展示的名字，可以是方便人类�
 desc: 预览磁力链接。 # 插件简短描述
 version: v0.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: Foolllll # 作者
-repo: https://github.com/Foolllll/astrbot_plugin_magnet_preview # 插件的仓库地址
+repo: https://github.com/Foolllll-J/astrbot_plugin_magnet_preview # 插件的仓库地址
