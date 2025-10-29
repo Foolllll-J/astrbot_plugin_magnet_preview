@@ -1,0 +1,16 @@
+{
+  "output_image_as_direct_link": {
+    "description": "是否以直链形式输出截图（而非发送图片文件）",
+    "type": "bool",
+    "default": true,
+    "hint": "建议开启。关闭时，插件将发送图片，请注意可能的风险。"
+  },
+  "max_screenshot_count": {
+    "description": "预览截图的最大数量 (0-5)",
+    "type": "int",
+    "default": 3,
+    "min": 0,
+    "max": 5,
+    "hint": "设置为 0 则不输出任何截图信息。"
+  }
+}
