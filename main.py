@@ -41,16 +41,16 @@ class MagnetPreviewer(Star):
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
 
-        self._magnet_regex = re.compile(r"(magnet:\?xt=urn:btih:[\w\d]{40}.*)")
+        self._magnet_regex = re.compile(r"(magnet:\?xt=urn:btih:([A-Za-z0-9]{32}|[a-fA-F0-9]{40}).*)")
         self._command_regex = re.compile(r"text='(.*?)'")
-        self._hash_regex = re.compile(r"([a-fA-F0-9]{40})")
+        self._hash_regex = re.compile(r"\b([A-Za-z0-9]{32}|[a-fA-F0-9]{40})\b")
         
     async def terminate(self):
         logger.info("Magnet Previewer terminating")
         await super().terminate()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    @filter.regex(r"(magnet:\?xt=urn:btih:[\w\d]{40}.*)|([a-fA-F0-9]{40})")
+    @filter.regex(r"(magnet:\?xt=urn:btih:([A-Za-z0-9]{32}|[a-fA-F0-9]{40}).*)|([A-Za-z0-9]{32}|[a-fA-F0-9]{40})")
     async def handle_magnet(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
         """处理磁力链接请求，根据配置决定输出方式"""
         
