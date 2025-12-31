@@ -1,6 +1,5 @@
 import re
 import math
-import base64
 from typing import Any, AsyncGenerator, Dict, List, Tuple
 import aiohttp
 import asyncio
@@ -31,7 +30,7 @@ class MagnetPreviewer(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
-        self.output_as_link = config.get("output_image_as_direct_link", True)
+        self.output_as_link = config.get("output_image_as_direct_link", False)
         try:
             self.max_screenshots = max(0, min(5, int(config.get("max_screenshot_count", 3))))
         except (TypeError, ValueError):
@@ -91,58 +90,53 @@ class MagnetPreviewer(Star):
             result_message = self._format_text_result(infos, screenshots_urls)
             yield event.plain_result(result_message)
         else:
-            # 图片模式，使用合并转发发送图文
+            # 图片模式，合并转发发送图文（每张图一个节点）
             async for result in self._generate_forward_result(event, infos, screenshots_urls):
                 yield result
 
     async def _generate_forward_result(self, event: AstrMessageEvent, infos: List[str], screenshots_urls: List[str]) -> AsyncGenerator[Any, Any]:
-        """生成并发送包含图片的合并转发消息"""
-        
+        """生成并发送包含图片的合并转发消息，每张图片单独一个节点"""
         sender_id = event.get_self_id()
-        download_success = 0
         forward_nodes: List[Node] = []
+        screenshot_line_index = None
         
         # 1. 纯文本信息节点
         if screenshots_urls:
-            infos.append(f"\n📸 预览截图 ({len(screenshots_urls)} 张):") 
+            screenshot_line_index = len(infos)
+            infos.append(f"\n📸 预览截图 ({len(screenshots_urls)} 张):")
+
+        # 2. 下载图片并逐张加入节点
+        image_bytes_list = await self._download_screenshots(screenshots_urls)
+        if image_bytes_list and screenshot_line_index is not None and len(image_bytes_list) != len(screenshots_urls):
+            infos[screenshot_line_index] = (
+                f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):"
+            )
 
         info_text = "\n".join(infos)
-        
+
         # 将文本部分分割成节点
         split_texts = self._split_text_by_length(info_text, 4000)
-        
+
         first_node_content = [Plain(text=split_texts[0])]
         forward_nodes.append(Node(uin=sender_id, name="磁力预览信息", content=first_node_content))
-        
-        for i, part_text in enumerate(split_texts[1:], 1):
-             forward_nodes.append(Node(uin=sender_id, name=f"磁力预览信息 ({i+1})", content=[Plain(text=part_text)]))
 
-        # 2. 图片节点
-        async with aiohttp.ClientSession() as session:
-            for url in screenshots_urls:
-                try:
-                    timeout = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
-                    async with session.get(url, timeout=timeout) as img_response:
-                        img_response.raise_for_status()
-                        image_bytes = await img_response.read()
-                    
-                    image_base64 = base64.b64encode(image_bytes).decode()
-                    image_component = Comp.Image(file=f"base64://{image_base64}")
-                    
-                    forward_nodes.append(Node(uin=sender_id, name="预览截图", content=[image_component]))
-                    download_success += 1
-                except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
-                    logger.warning(f"❌ 下载并添加到转发失败 ({url}): {type(e).__name__} - {str(e)}")
-                    continue
+        for i, part_text in enumerate(split_texts[1:], 1):
+            forward_nodes.append(Node(uin=sender_id, name=f"磁力预览信息 ({i+1})", content=[Plain(text=part_text)]))
+
+        for image_bytes in image_bytes_list:
+            image_component = Comp.Image.fromBytes(image_bytes)
+            forward_nodes.append(Node(uin=sender_id, name="预览截图", content=[image_component]))
         
         # 3. 检查发送结果
-        if download_success == 0 and len(screenshots_urls) > 0:
+        if not image_bytes_list and len(screenshots_urls) > 0:
             logger.warning("所有图片下载失败，回退到纯文本链接模式。")
             result_message = self._format_text_result(infos, screenshots_urls)
             yield event.plain_result("⚠️ 图片发送失败，已改为发送链接。\n\n" + result_message)
-        else:
-            merged_forward_message = Nodes(nodes=forward_nodes)
-            yield event.chain_result([merged_forward_message])
+            return
+
+        # 4. 合并转发发送
+        merged_forward_message = Nodes(nodes=forward_nodes)
+        yield event.chain_result([merged_forward_message])
 
     def _split_text_by_length(self, text: str, max_length: int = 4000) -> List[str]:
         """将文本按指定长度分割成一个字符串列表"""
@@ -202,6 +196,26 @@ class MagnetPreviewer(Star):
             return None
         except Exception as e:
             logger.error(f"An unexpected error occurred during fetch: {e}")
+            return None
+
+    async def _download_screenshots(self, screenshots_urls: List[str]) -> List[bytes]:
+        """下载截图并返回原始字节列表"""
+        if not screenshots_urls:
+            return []
+
+        timeout = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            tasks = [self._fetch_image_bytes(session, url) for url in screenshots_urls]
+            results = await asyncio.gather(*tasks)
+        return [result for result in results if result]
+
+    async def _fetch_image_bytes(self, session: aiohttp.ClientSession, url: str) -> bytes | None:
+        try:
+            async with session.get(url) as img_response:
+                img_response.raise_for_status()
+                return await img_response.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
+            logger.warning(f"❌ 下载截图失败 ({url}): {type(e).__name__} - {str(e)}")
             return None
 
     def replace_image_url(self, image_url: str) -> str:
