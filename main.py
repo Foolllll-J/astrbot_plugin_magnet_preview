@@ -1,10 +1,8 @@
 import re
 import math
-from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Tuple
 import aiohttp
 import asyncio
-from PIL import Image as PILImage
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter, MessageChain
@@ -92,26 +90,24 @@ class MagnetPreviewer(Star):
             result_message = self._format_text_result(infos, screenshots_urls)
             yield event.plain_result(result_message)
         else:
-            # 图片模式，使用合并转发发送图文
+            # 图片模式，合并转发发送图文（每张图一个节点）
             async for result in self._generate_forward_result(event, infos, screenshots_urls):
                 yield result
 
     async def _generate_forward_result(self, event: AstrMessageEvent, infos: List[str], screenshots_urls: List[str]) -> AsyncGenerator[Any, Any]:
-        """生成并发送包含图片的合并转发消息"""
-        
+        """生成并发送包含图片的合并转发消息，每张图片单独一个节点"""
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
+        screenshot_line_index = None
         
         # 1. 纯文本信息节点
-        screenshot_line_index = None
         if screenshots_urls:
             screenshot_line_index = len(infos)
             infos.append(f"\n📸 预览截图 ({len(screenshots_urls)} 张):")
 
-        # 2. 图片节点（拼接发送）
+        # 2. 下载图片并逐张加入节点
         image_bytes_list = await self._download_screenshots(screenshots_urls)
-        merged_image_bytes = self._merge_images(image_bytes_list)
-        if merged_image_bytes and screenshot_line_index is not None and len(image_bytes_list) != len(screenshots_urls):
+        if image_bytes_list and screenshot_line_index is not None and len(image_bytes_list) != len(screenshots_urls):
             infos[screenshot_line_index] = (
                 f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):"
             )
@@ -127,18 +123,20 @@ class MagnetPreviewer(Star):
         for i, part_text in enumerate(split_texts[1:], 1):
             forward_nodes.append(Node(uin=sender_id, name=f"磁力预览信息 ({i+1})", content=[Plain(text=part_text)]))
 
-        if merged_image_bytes:
-            image_component = Comp.Image.fromBytes(merged_image_bytes)
+        for image_bytes in image_bytes_list:
+            image_component = Comp.Image.fromBytes(image_bytes)
             forward_nodes.append(Node(uin=sender_id, name="预览截图", content=[image_component]))
         
         # 3. 检查发送结果
-        if not merged_image_bytes and len(screenshots_urls) > 0:
-            logger.warning("所有图片下载/拼接失败，回退到纯文本链接模式。")
+        if not image_bytes_list and len(screenshots_urls) > 0:
+            logger.warning("所有图片下载失败，回退到纯文本链接模式。")
             result_message = self._format_text_result(infos, screenshots_urls)
             yield event.plain_result("⚠️ 图片发送失败，已改为发送链接。\n\n" + result_message)
-        else:
-            merged_forward_message = Nodes(nodes=forward_nodes)
-            yield event.chain_result([merged_forward_message])
+            return
+
+        # 4. 合并转发发送
+        merged_forward_message = Nodes(nodes=forward_nodes)
+        yield event.chain_result([merged_forward_message])
 
     def _split_text_by_length(self, text: str, max_length: int = 4000) -> List[str]:
         """将文本按指定长度分割成一个字符串列表"""
@@ -219,39 +217,6 @@ class MagnetPreviewer(Star):
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
             logger.warning(f"❌ 下载截图失败 ({url}): {type(e).__name__} - {str(e)}")
             return None
-
-    def _merge_images(self, image_bytes_list: List[bytes]) -> bytes | None:
-        """将多张图片按垂直方向拼接并输出为 JPEG 字节"""
-        if not image_bytes_list:
-            return None
-
-        images = []
-        for image_bytes in image_bytes_list:
-            try:
-                img = PILImage.open(BytesIO(image_bytes)).convert("RGBA")
-                images.append(img)
-            except Exception as e:
-                logger.warning(f"❌ 处理截图失败: {type(e).__name__} - {str(e)}")
-
-        if not images:
-            return None
-
-        max_width = max(img.width for img in images)
-        total_height = sum(img.height for img in images)
-        canvas = PILImage.new("RGBA", (max_width, total_height), (255, 255, 255, 255))
-
-        y_offset = 0
-        for img in images:
-            x_offset = (max_width - img.width) // 2
-            canvas.paste(img, (x_offset, y_offset), img)
-            y_offset += img.height
-
-        final_image = PILImage.new("RGB", canvas.size, "#ffffff")
-        final_image.paste(canvas, mask=canvas.split()[3])
-
-        buffer = BytesIO()
-        final_image.save(buffer, format="JPEG", quality=85)
-        return buffer.getvalue()
 
     def replace_image_url(self, image_url: str) -> str:
         """替换图片URL域名"""
