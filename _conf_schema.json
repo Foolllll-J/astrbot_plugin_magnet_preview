@@ -1,6 +1,21 @@
 {
-  "output_image_as_direct_link": {
-    "description": "是否以直链形式发送截图（而非发送图片）",
+  "group_whitelist": {
+    "description": "启用插件的群组白名单",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": [],
+    "hint": "留空表示全局启用。输入群号列表，仅在列表中的群组生效。"
+  },
+  "auto_parse": {
+    "description": "是否自动解析消息中的磁链",
+    "type": "bool",
+    "default": true,
+    "hint": "开启时，发送包含磁链的消息将自动触发预览。关闭后仅指令触发。"
+  },
+  "output_as_link": {
+    "description": "是否以直链形式发送截图",
     "type": "bool",
     "default": false,
     "hint": "关闭时，插件将以合并转发形式发送截图。"
@@ -26,5 +41,16 @@
       "step": 0.01
     },
     "hint": "设置为 0 则禁用打码，值越大模糊越强。"
+  },
+  "max_magnet_count": {
+    "description": "单次消息最多解析磁链数量",
+    "type": "int",
+    "default": 1,
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    },
+    "hint": "默认为 1，即只解析第一个磁链。设置大于 1 时，会将多个解析结果合并发送。"
   }
 }

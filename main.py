@@ -18,7 +18,7 @@ DEFAULT_TIMEOUT = 10
 FILE_TYPE_MAP = {
     'folder': '📁 文件夹',
     'video': '🎥 视频',
-    'image': '🖼 图片',
+    'image': '🌄 图片',
     'text': '📄 文本',
     'audio': '🎵 音频',
     'archive': '📦 压缩包',
@@ -26,125 +26,269 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "预览磁链信息", "1.0")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链信息预览", "1.1")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
         self.output_as_link = config.get("output_image_as_direct_link", False)
-        try:
-            self.max_screenshots = max(0, min(5, int(config.get("max_screenshot_count", 3))))
-        except (TypeError, ValueError):
-            self.max_screenshots = 3
-            logger.warning("Invalid max_screenshot_count config, using default 3.")
-
-        try:
-            self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
-        except (TypeError, ValueError):
-            self.cover_mosaic_level = 0.3
-            logger.warning("Invalid cover_mosaic_level config, using default 0.3.")
+        self.max_screenshots = max(0, min(5, int(config.get("max_screenshot_count", 3))))
+        self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
+        self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
+        self.auto_parse = config.get("auto_parse", True)
+        self.group_whitelist = [str(gid) for gid in config.get("group_whitelist", [])]
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
 
-        self._magnet_regex = re.compile(r"(magnet:\?xt=urn:btih:[\w\d]{40}.*)")
+        self._magnet_regex = re.compile(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})")
         self._command_regex = re.compile(r"text='(.*?)'")
-        self._hash_regex = re.compile(r"([a-fA-F0-9]{40})")
+        self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b")
         
     async def terminate(self):
-        logger.info("Magnet Previewer terminating")
+        logger.info("磁链预览插件已终止")
         await super().terminate()
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    @filter.regex(r"(magnet:\?xt=urn:btih:[\w\d]{40}.*)|([a-fA-F0-9]{40})")
-    async def handle_magnet(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
-        """处理磁力链接请求，根据配置决定输出方式"""
+    @filter.command("磁链", alias=["磁力"])
+    async def magnet_cmd(self, event: AstrMessageEvent, arg: str = ""):
+        """磁链解析指令，支持引用消息解析和直接输入"""
+        if not self._is_allowed(event):
+            return
+            
+        target_text = ""
+        index = -1
         
-        plain_text = str(event.get_messages()[0])
-        link = ""
+        # 1. 解析参数：是数字索引还是直接输入的磁链
+        if arg.isdigit():
+            index = int(arg)
+        elif arg:
+            target_text = arg
+            
+        # 2. 检查是否引用了消息
+        reply_id = None
+        for seg in event.message_obj.message:
+            if isinstance(seg, Comp.Reply):
+                reply_id = seg.id
+                break
+        
+        if reply_id:
+            try:
+                # 获取引用消息详情
+                bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
+                if bot:
+                    res = await bot.api.call_action('get_msg', message_id=reply_id)
+                    if res and 'message' in res:
+                        original_message = res['message']
+                        ref_text = ""
+                        if isinstance(original_message, list):
+                            for segment in original_message:
+                                seg_type = segment.get("type")
+                                seg_data = segment.get("data", {})
+                                if seg_type == "text":
+                                    ref_text += seg_data.get("text", "") + " "
+                                elif seg_type == "forward":
+                                    forward_id = seg_data.get("id")
+                                    if forward_id:
+                                        texts = await self._extract_forward_text(event, forward_id)
+                                        ref_text += " ".join(texts) + " "
+                        elif isinstance(original_message, str):
+                            ref_text = original_message
+                        
+                        # 如果引用消息中有文本，则优先使用引用消息的内容
+                        if ref_text.strip():
+                            target_text = ref_text
+            except Exception as e:
+                logger.warning(f"获取引用消息失败: {e}")
+        
+        # 3. 提取文本中的所有磁链
+        all_links = self._extract_all_magnets(target_text)
+        
+        if not all_links:
+            yield event.plain_result("💡 请引用包含磁链的消息，或直接输入：磁链 magnet:?xt=...")
+            return
+
+        # 4. 根据 index 参数选择解析范围
+        links_to_process = []
+        if index > 0:
+            if index <= len(all_links):
+                links_to_process = [all_links[index - 1]]
+            else:
+                yield event.plain_result(f"⚠️ 目标消息中只有 {len(all_links)} 条磁链，无法解析第 {index} 条。")
+                return
+        else:
+            # 默认按配置解析前 N 条
+            links_to_process = all_links[:self.max_magnet_count]
+
+        # 5. 执行解析和显示逻辑
+        async for result in self._process_and_show_magnets(event, links_to_process):
+            yield result
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.regex(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})|\b([a-fA-F0-9]{40})\b")
+    async def handle_magnet_regex(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
+        """正则触发的自动解析"""
+        # 检查自动解析开关
+        if not self.auto_parse:
+            return
+
+        # 检查白名单
+        if not self._is_allowed(event):
+            return
+
+        # 如果消息是以指令开头的，则不触发正则逻辑，避免重复触发
+        if event.message_str.startswith(("磁链", "磁力", "/磁链", "/磁力")):
+            return
+
+        plain_text = event.message_str
+        links = self._extract_all_magnets(plain_text)[:self.max_magnet_count]
+        
+        if not links:
+            return
+
+        async for result in self._process_and_show_magnets(event, links):
+            yield result
+
+    def _is_allowed(self, event: AstrMessageEvent) -> bool:
+        """检查当前场景是否允许运行。私聊场景不受群组白名单限制"""
+        # 如果是私聊场景，直接允许
+        if not event.get_group_id():
+            return True
+            
+        # 如果没有设置白名单，则所有群组都允许
+        if not self.group_whitelist:
+            return True
+        
+        gid = event.get_group_id()
+        return str(gid) in self.group_whitelist
+
+    def _extract_all_magnets(self, text: str) -> List[str]:
+        """从文本中提取所有磁力链接（去重）"""
+        links = []
+        seen_hashes = set()
         
         # 1. 提取磁力链接
-        matches_magnet = self._magnet_regex.search(plain_text)
-        if matches_magnet:
-            link = matches_magnet.group(1).split('&')[0]
+        for match in self._magnet_regex.finditer(text):
+            info_hash = match.group(1).upper()
+            if info_hash not in seen_hashes:
+                links.append(f"magnet:?xt=urn:btih:{info_hash}")
+                seen_hashes.add(info_hash)
             
-        # 如果没有找到完整的链接，则寻找裸哈希
-        if not link:
-            matches_hash = self._hash_regex.search(plain_text)
-            if matches_hash:
-                info_hash = matches_hash.group(1).upper() # 提取哈希并转大写
-                link = f"magnet:?xt=urn:btih:{info_hash}"
-        if not link:
-            yield event.plain_result("⚠️ 格式错误，未找到有效的磁力链接。")
-            return
+        # 2. 提取裸哈希
+        for match in self._hash_regex.finditer(text):
+            info_hash = match.group(1).upper()
+            if info_hash not in seen_hashes:
+                links.append(f"magnet:?xt=urn:btih:{info_hash}")
+                seen_hashes.add(info_hash)
+        
+        return links
+
+    async def _extract_forward_text(self, event: AstrMessageEvent, forward_id: str) -> List[str]:
+        """提取合并转发消息中的文本内容"""
+        extracted_texts = []
+        try:
+            # 尝试获取适配器调用 API
+            bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
+            if bot:
+                forward_data = await bot.api.call_action('get_forward_msg', id=forward_id)
+                if forward_data and "messages" in forward_data:
+                    for msg_node in forward_data["messages"]:
+                        content = msg_node.get("message") or msg_node.get("content", [])
+                        if isinstance(content, list):
+                            for segment in content:
+                                if segment.get("type") == "text":
+                                    extracted_texts.append(segment.get("data", {}).get("text", ""))
+                        elif isinstance(content, str):
+                            extracted_texts.append(content)
+        except Exception as e:
+            logger.warning(f"提取转发消息失败: {e}")
+        return extracted_texts
+
+    async def _process_and_show_magnets(self, event: AstrMessageEvent, links: List[str]) -> AsyncGenerator[Any, Any]:
+        """统一的磁链处理和展示流程"""
+        all_results = []
+        for link in links:
+            logger.info(f"解析磁力链接: {link}")
+            data = await self._fetch_magnet_info(link)
             
-        logger.info(f"解析磁力链接: {link}")
+            if not data or data.get('error'):
+                error_msg = data.get('name', '未知错误') if data else 'API无响应'
+                all_results.append(([f"⚠️ 解析失败 ({link}): {error_msg.split('contact')[0].strip()}"], []))
+            else:
+                infos, screenshots_urls = self._sort_infos_and_get_urls(data)
+                all_results.append((infos, screenshots_urls))
 
-        # 2. 调用 API 解析
-        data = await self._fetch_magnet_info(link)
-
-        # 3. 处理 API 错误
-        if not data or data.get('error'):
-            error_msg = data.get('name', '未知错误') if data else 'API无响应'
-            yield event.plain_result(f"⚠️ 解析失败: {error_msg.split('contact')[0].strip()}")
+        if not all_results:
             return
 
-        # 4. 生成结果消息并回复
-        infos, screenshots_urls = self._sort_infos_and_get_urls(data)
+        # 检查是否所有结果都没有图片
+        all_no_images = all(not urls for _, urls in all_results)
 
-        if self.output_as_link or not screenshots_urls:
-            # 直链模式或无图片，发送纯文本
-            result_message = self._format_text_result(infos, screenshots_urls)
-            yield event.plain_result(result_message)
+        if len(all_results) == 1:
+            # 单个结果的情况
+            infos, screenshots_urls = all_results[0]
+            if self.output_as_link or not screenshots_urls:
+                yield event.plain_result(self._format_text_result(infos, screenshots_urls))
+            else:
+                async for result in self._generate_multi_forward_result(event, all_results):
+                    yield result
         else:
-            # 图片模式，合并转发发送图文（每张图一个节点）
-            async for result in self._generate_forward_result(event, infos, screenshots_urls):
+            # 多个结果，始终发送合并转发
+            async for result in self._generate_multi_forward_result(event, all_results):
                 yield result
 
-    async def _generate_forward_result(self, event: AstrMessageEvent, infos: List[str], screenshots_urls: List[str]) -> AsyncGenerator[Any, Any]:
-        """生成并发送包含图片的合并转发消息，每张图片单独一个节点"""
+    async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]]) -> AsyncGenerator[Any, Any]:
+        """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
-        screenshot_line_index = None
         
-        # 1. 纯文本信息节点
-        if screenshots_urls:
-            screenshot_line_index = len(infos)
-            infos.append(f"\n📸 预览截图 ({len(screenshots_urls)} 张):")
+        for i, (infos, screenshots_urls) in enumerate(all_results):
+            if self.output_as_link:
+                # 1. 直链模式：直接将包含链接的文本作为节点
+                res_text = self._format_text_result(infos, screenshots_urls)
+                if len(all_results) > 1:
+                    res_text = f"🔗 磁链预览 #{i+1}\n\n" + res_text
+                
+                split_texts = self._split_text_by_length(res_text, 4000)
+                for part_text in split_texts:
+                    node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
+                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
+            else:
+                # 2. 图片模式：下载图片并分节点展示
+                image_bytes_list = await self._download_screenshots(screenshots_urls)
+                
+                # 准备文本信息
+                display_infos = list(infos)
+                if len(all_results) > 1:
+                    display_infos.insert(0, f"🔗 磁链预览 #{i+1}")
 
-        # 2. 下载图片并逐张加入节点
-        image_bytes_list = await self._download_screenshots(screenshots_urls)
-        if image_bytes_list and screenshot_line_index is not None and len(image_bytes_list) != len(screenshots_urls):
-            infos[screenshot_line_index] = (
-                f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):"
-            )
+                if screenshots_urls:
+                    display_infos.append(f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):")
 
-        info_text = "\n".join(infos)
+                info_text = "\n".join(display_infos)
+                split_texts = self._split_text_by_length(info_text, 4000)
 
-        # 将文本部分分割成节点
-        split_texts = self._split_text_by_length(info_text, 4000)
+                # 添加文本节点
+                for j, part_text in enumerate(split_texts):
+                    node_name = "磁力预览信息"
+                    if len(all_results) > 1:
+                        node_name += f" ({i+1})"
+                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
 
-        first_node_content = [Plain(text=split_texts[0])]
-        forward_nodes.append(Node(uin=sender_id, name="磁力预览信息", content=first_node_content))
+                # 添加图片节点
+                for img_bytes in image_bytes_list:
+                    if self.cover_mosaic_level > 0:
+                        img_bytes = self._apply_mosaic(img_bytes)
+                    image_component = Comp.Image.fromBytes(img_bytes)
+                    node_name = "预览截图"
+                    if len(all_results) > 1:
+                        node_name += f" ({i+1})"
+                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[image_component]))
 
-        for i, part_text in enumerate(split_texts[1:], 1):
-            forward_nodes.append(Node(uin=sender_id, name=f"磁力预览信息 ({i+1})", content=[Plain(text=part_text)]))
-
-        for image_bytes in image_bytes_list:
-            if self.cover_mosaic_level > 0:
-                image_bytes = self._apply_mosaic(image_bytes)
-            image_component = Comp.Image.fromBytes(image_bytes)
-            forward_nodes.append(Node(uin=sender_id, name="预览截图", content=[image_component]))
-        
-        # 3. 检查发送结果
-        if not image_bytes_list and len(screenshots_urls) > 0:
-            logger.warning("所有图片下载失败，回退到纯文本链接模式。")
-            result_message = self._format_text_result(infos, screenshots_urls)
-            yield event.plain_result("⚠️ 图片发送失败，已改为发送链接。\n\n" + result_message)
+        if not forward_nodes:
+            yield event.plain_result("⚠️ 未能生成有效的预览内容。")
             return
 
-        # 4. 合并转发发送
         merged_forward_message = Nodes(nodes=forward_nodes)
         yield event.chain_result([merged_forward_message])
 
