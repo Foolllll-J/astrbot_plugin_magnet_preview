@@ -1,8 +1,10 @@
 import re
 import math
-from typing import Any, AsyncGenerator, Dict, List, Tuple
-import aiohttp
 import asyncio
+import aiohttp
+from io import BytesIO
+from typing import Any, AsyncGenerator, Dict, List, Tuple
+from PIL import Image, ImageFilter
 
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter, MessageChain
@@ -36,6 +38,12 @@ class MagnetPreviewer(Star):
         except (TypeError, ValueError):
             self.max_screenshots = 3
             logger.warning("Invalid max_screenshot_count config, using default 3.")
+
+        try:
+            self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
+        except (TypeError, ValueError):
+            self.cover_mosaic_level = 0.3
+            logger.warning("Invalid cover_mosaic_level config, using default 0.3.")
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
@@ -124,6 +132,8 @@ class MagnetPreviewer(Star):
             forward_nodes.append(Node(uin=sender_id, name=f"磁力预览信息 ({i+1})", content=[Plain(text=part_text)]))
 
         for image_bytes in image_bytes_list:
+            if self.cover_mosaic_level > 0:
+                image_bytes = self._apply_mosaic(image_bytes)
             image_component = Comp.Image.fromBytes(image_bytes)
             forward_nodes.append(Node(uin=sender_id, name="预览截图", content=[image_component]))
         
@@ -217,6 +227,27 @@ class MagnetPreviewer(Star):
         except (aiohttp.ClientError, asyncio.TimeoutError, Exception) as e:
             logger.warning(f"❌ 下载截图失败 ({url}): {type(e).__name__} - {str(e)}")
             return None
+
+    def _apply_mosaic(self, image_data: bytes) -> bytes:
+        """应用高斯模糊打码"""
+        try:
+            with Image.open(BytesIO(image_data)) as img:
+                # 转换为 RGB，防止 RGBA 等格式保存为 JPEG 时出错
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                
+                w, h = img.size
+                # 将除数从 10 调整为 50，使模糊效果更平滑且可控
+                radius = int(max(w, h) * self.cover_mosaic_level / 50)
+                if radius > 0:
+                    img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+                
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                return buffered.getvalue()
+        except Exception as e:
+            logger.warning(f"图片打码处理失败: {e}")
+            return image_data
 
     def replace_image_url(self, image_url: str) -> str:
         """替换图片URL域名"""

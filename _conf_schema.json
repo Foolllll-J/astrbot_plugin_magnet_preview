@@ -3,14 +3,28 @@
     "description": "是否以直链形式发送截图（而非发送图片）",
     "type": "bool",
     "default": false,
-    "hint": "关闭时，插件将以合并转发发送截图（每张图单独一条）。"
+    "hint": "关闭时，插件将以合并转发形式发送截图。"
   },
   "max_screenshot_count": {
     "description": "预览截图的最大数量 (0-5)",
     "type": "int",
     "default": 3,
-    "min": 0,
-    "max": 5,
+    "slider": {
+      "min": 0,
+      "max": 5,
+      "step": 1
+    },
     "hint": "设置为 0 则不输出任何截图信息。"
+  },
+  "cover_mosaic_level": {
+    "description": "预览图打码程度 (0.0-1.0)",
+    "type": "float",
+    "default": 0.3,
+    "slider": {
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    "hint": "设置为 0 则禁用打码，值越大模糊越强。"
   }
 }
