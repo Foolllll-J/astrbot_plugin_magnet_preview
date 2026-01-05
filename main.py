@@ -32,7 +32,7 @@ class MagnetPreviewer(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
-        self.output_as_link = config.get("output_image_as_direct_link", False)
+        self.output_as_link = config.get("output_as_link", False)
         self.max_screenshots = max(0, min(5, int(config.get("max_screenshot_count", 3))))
         self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
         self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
