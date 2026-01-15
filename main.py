@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链信息预览", "1.1")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.1")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
