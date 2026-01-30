@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.1")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.1.1")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -42,9 +42,9 @@ class MagnetPreviewer(Star):
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
 
-        self._magnet_regex = re.compile(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})")
+        self._magnet_regex = re.compile(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})", re.IGNORECASE)
         self._command_regex = re.compile(r"text='(.*?)'")
-        self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b")
+        self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b", re.IGNORECASE)
         
     async def terminate(self):
         logger.info("磁链预览插件已终止")
@@ -125,7 +125,7 @@ class MagnetPreviewer(Star):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    @filter.regex(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})|\b([a-fA-F0-9]{40})\b")
+    @filter.regex(r"(?s).*?(magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}|[a-fA-F0-9]{40}).*")
     async def handle_magnet_regex(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
         """正则触发的自动解析"""
         # 检查自动解析开关
