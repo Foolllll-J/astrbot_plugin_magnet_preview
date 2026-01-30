@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.1.1")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.0")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -37,6 +37,7 @@ class MagnetPreviewer(Star):
         self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
         self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
         self.auto_parse = config.get("auto_parse", True)
+        self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
         self.group_whitelist = [str(gid) for gid in config.get("group_whitelist", [])]
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
@@ -206,6 +207,9 @@ class MagnetPreviewer(Star):
 
     async def _process_and_show_magnets(self, event: AstrMessageEvent, links: List[str]) -> AsyncGenerator[Any, Any]:
         """统一的磁链处理和展示流程"""
+        # 给消息贴表情，表示正在处理
+        await self._set_emoji(event, 339)
+
         all_results = []
         for link in links:
             logger.info(f"解析磁力链接: {link}")
@@ -236,6 +240,20 @@ class MagnetPreviewer(Star):
             # 多个结果，始终发送合并转发
             async for result in self._generate_multi_forward_result(event, all_results):
                 yield result
+
+    async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int):
+        """给消息贴表情"""
+        if not self.enable_emoji_reaction:
+            return
+
+        try:
+            await event.bot.set_msg_emoji_like( 
+                message_id=event.message_obj.message_id, 
+                emoji_id=emoji_id, 
+                set=True, 
+            ) 
+        except Exception as e:
+            logger.debug(f"贴表情失败: {e}")
 
     async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]]) -> AsyncGenerator[Any, Any]:
         """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""

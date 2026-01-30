@@ -9,13 +9,19 @@
     "hint": "留空表示全局启用。输入群号列表，仅在列表中的群组生效。"
   },
   "auto_parse": {
-    "description": "是否自动解析消息中的磁链",
+    "description": "自动解析消息中的磁链",
     "type": "bool",
     "default": true,
     "hint": "开启时，发送包含磁链的消息将自动触发预览。关闭后仅指令触发。"
   },
+  "enable_emoji_reaction": {
+    "description": "是否开启表情回应",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，插件在处理磁链时会给原消息贴表情以示响应。"
+  },
   "output_as_link": {
-    "description": "是否以直链形式发送截图",
+    "description": "以直链形式发送截图",
     "type": "bool",
     "default": false,
     "hint": "关闭时，插件将以合并转发形式发送截图。"
@@ -32,7 +38,7 @@
     "hint": "设置为 0 则不输出任何截图信息。"
   },
   "cover_mosaic_level": {
-    "description": "预览图打码程度 (0.0-1.0)",
+    "description": "预览图模糊程度 (0.0-1.0)",
     "type": "float",
     "default": 0.3,
     "slider": {
@@ -40,7 +46,7 @@
       "max": 1.0,
       "step": 0.01
     },
-    "hint": "设置为 0 则禁用打码，值越大模糊越强。"
+    "hint": "设置为 0 则禁用模糊，值越大模糊越强。"
   },
   "max_magnet_count": {
     "description": "单次消息最多解析磁链数量",
