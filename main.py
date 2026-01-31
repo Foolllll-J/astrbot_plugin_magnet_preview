@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.0")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.1")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -52,21 +52,30 @@ class MagnetPreviewer(Star):
         await super().terminate()
 
     @filter.command("磁链", alias=["磁力"])
-    async def magnet_cmd(self, event: AstrMessageEvent, arg: str = ""):
+    async def magnet_cmd(self, event: AstrMessageEvent):
         """磁链解析指令，支持引用消息解析和直接输入"""
         if not self._is_allowed(event):
             return
             
+        full_msg = event.message_str.strip()
+        parts = full_msg.split(maxsplit=1)
+        arg = parts[1] if len(parts) > 1 else ""
+
         target_text = ""
-        index = -1
+        target_index = -1
+        custom_blur_level = None
+
+        args = arg.split()
         
-        # 1. 解析参数：是数字索引还是直接输入的磁链
-        if arg.isdigit():
-            index = int(arg)
-        elif arg:
-            target_text = arg
+        is_all_numeric = True
+        for a in args:
+            if not a.isdigit():
+                is_all_numeric = False
+                break 
+        
+        if not is_all_numeric:
+            target_text = arg 
             
-        # 2. 检查是否引用了消息
         reply_id = None
         for seg in event.message_obj.message:
             if isinstance(seg, Comp.Reply):
@@ -75,7 +84,6 @@ class MagnetPreviewer(Star):
         
         if reply_id:
             try:
-                # 获取引用消息详情
                 bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
                 if bot:
                     res = await bot.api.call_action('get_msg', message_id=reply_id)
@@ -96,33 +104,45 @@ class MagnetPreviewer(Star):
                         elif isinstance(original_message, str):
                             ref_text = original_message
                         
-                        # 如果引用消息中有文本，则优先使用引用消息的内容
                         if ref_text.strip():
                             target_text = ref_text
             except Exception as e:
                 logger.warning(f"获取引用消息失败: {e}")
         
-        # 3. 提取文本中的所有磁链
+        if not target_text and not is_all_numeric:
+            target_text = arg
+        
         all_links = self._extract_all_magnets(target_text)
         
         if not all_links:
             yield event.plain_result("💡 请引用包含磁链的消息，或直接输入：磁链 magnet:?xt=...")
             return
 
-        # 4. 根据 index 参数选择解析范围
+        if is_all_numeric and len(args) > 0:
+            if len(args) >= 2:
+                target_index = int(args[0])
+                blur_val = int(args[1])
+                custom_blur_level = max(0, min(10, blur_val)) / 10.0
+            
+            elif len(args) == 1:
+                val = int(args[0])
+                if len(all_links) == 1:
+                    target_index = 1 
+                    custom_blur_level = max(0, min(10, val)) / 10.0
+                else:
+                    target_index = val
+
         links_to_process = []
-        if index > 0:
-            if index <= len(all_links):
-                links_to_process = [all_links[index - 1]]
+        if target_index > 0:
+            if target_index <= len(all_links):
+                links_to_process = [all_links[target_index - 1]]
             else:
-                yield event.plain_result(f"⚠️ 目标消息中只有 {len(all_links)} 条磁链，无法解析第 {index} 条。")
+                yield event.plain_result(f"⚠️ 目标消息中只有 {len(all_links)} 条磁链，无法解析第 {target_index} 条。")
                 return
         else:
-            # 默认按配置解析前 N 条
             links_to_process = all_links[:self.max_magnet_count]
 
-        # 5. 执行解析和显示逻辑
-        async for result in self._process_and_show_magnets(event, links_to_process):
+        async for result in self._process_and_show_magnets(event, links_to_process, custom_blur_level):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -146,6 +166,9 @@ class MagnetPreviewer(Star):
         
         if not links:
             return
+
+        # 自动触发时贴表情
+        await self._set_emoji(event, 339)
 
         async for result in self._process_and_show_magnets(event, links):
             yield result
@@ -205,14 +228,10 @@ class MagnetPreviewer(Star):
             logger.warning(f"提取转发消息失败: {e}")
         return extracted_texts
 
-    async def _process_and_show_magnets(self, event: AstrMessageEvent, links: List[str]) -> AsyncGenerator[Any, Any]:
+    async def _process_and_show_magnets(self, event: AstrMessageEvent, links: List[str], custom_blur: float = None) -> AsyncGenerator[Any, Any]:
         """统一的磁链处理和展示流程"""
-        # 给消息贴表情，表示正在处理
-        await self._set_emoji(event, 339)
-
         all_results = []
         for link in links:
-            logger.info(f"解析磁力链接: {link}")
             data = await self._fetch_magnet_info(link)
             
             if not data or data.get('error'):
@@ -225,20 +244,17 @@ class MagnetPreviewer(Star):
         if not all_results:
             return
 
-        # 检查是否所有结果都没有图片
-        all_no_images = all(not urls for _, urls in all_results)
-
         if len(all_results) == 1:
-            # 单个结果的情况
             infos, screenshots_urls = all_results[0]
-            if self.output_as_link or not screenshots_urls:
+            force_image_mode = custom_blur is not None
+            
+            if (self.output_as_link and not force_image_mode) or not screenshots_urls:
                 yield event.plain_result(self._format_text_result(infos, screenshots_urls))
             else:
-                async for result in self._generate_multi_forward_result(event, all_results):
+                async for result in self._generate_multi_forward_result(event, all_results, custom_blur):
                     yield result
         else:
-            # 多个结果，始终发送合并转发
-            async for result in self._generate_multi_forward_result(event, all_results):
+            async for result in self._generate_multi_forward_result(event, all_results, custom_blur):
                 yield result
 
     async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int):
@@ -255,13 +271,16 @@ class MagnetPreviewer(Star):
         except Exception as e:
             logger.debug(f"贴表情失败: {e}")
 
-    async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]]) -> AsyncGenerator[Any, Any]:
+    async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]], custom_blur: float = None) -> AsyncGenerator[Any, Any]:
         """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
         
+        # 如果指定了 custom_blur，强制使用图片模式
+        force_image_mode = custom_blur is not None
+
         for i, (infos, screenshots_urls) in enumerate(all_results):
-            if self.output_as_link:
+            if self.output_as_link and not force_image_mode:
                 # 1. 直链模式：直接将包含链接的文本作为节点
                 res_text = self._format_text_result(infos, screenshots_urls)
                 if len(all_results) > 1:
@@ -294,9 +313,12 @@ class MagnetPreviewer(Star):
                     forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
 
                 # 添加图片节点
+                # 确定使用的模糊度
+                blur_level = custom_blur if custom_blur is not None else self.cover_mosaic_level
+
                 for img_bytes in image_bytes_list:
-                    if self.cover_mosaic_level > 0:
-                        img_bytes = self._apply_mosaic(img_bytes)
+                    if blur_level is not None:
+                        img_bytes = self._apply_mosaic(img_bytes, blur_level)
                     image_component = Comp.Image.fromBytes(img_bytes)
                     node_name = "预览截图"
                     if len(all_results) > 1:
@@ -390,25 +412,30 @@ class MagnetPreviewer(Star):
             logger.warning(f"❌ 下载截图失败 ({url}): {type(e).__name__} - {str(e)}")
             return None
 
-    def _apply_mosaic(self, image_data: bytes) -> bytes:
+    def _apply_mosaic(self, image_data: bytes, level: float = None) -> bytes:
         """应用高斯模糊打码"""
+        mosaic_level = level if level is not None else self.cover_mosaic_level
+        
+        if mosaic_level <= 0:
+            return image_data
+
         try:
             with Image.open(BytesIO(image_data)) as img:
                 # 转换为 RGB，防止 RGBA 等格式保存为 JPEG 时出错
                 if img.mode != "RGB":
                     img = img.convert("RGB")
                 
-                w, h = img.size
-                # 将除数从 10 调整为 50，使模糊效果更平滑且可控
-                radius = int(max(w, h) * self.cover_mosaic_level / 50)
-                if radius > 0:
-                    img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+                # mosaic_level 为 0.0-1.0，转换为模糊半径
+                blur_radius = mosaic_level * 10
+                
+                if blur_radius > 0:
+                    img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
                 
                 buffered = BytesIO()
-                img.save(buffered, format="JPEG")
+                img.save(buffered, format="JPEG", quality=85)
                 return buffered.getvalue()
         except Exception as e:
-            logger.warning(f"图片打码处理失败: {e}")
+            logger.error(f"应用模糊失败: {e}")
             return image_data
 
     def replace_image_url(self, image_url: str) -> str:
