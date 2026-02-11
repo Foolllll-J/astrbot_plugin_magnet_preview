@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.1")
+@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.2")
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -81,7 +81,7 @@ class MagnetPreviewer(Star):
             if isinstance(seg, Comp.Reply):
                 reply_id = seg.id
                 break
-        
+
         if reply_id:
             try:
                 bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
@@ -97,10 +97,22 @@ class MagnetPreviewer(Star):
                                 if seg_type == "text":
                                     ref_text += seg_data.get("text", "") + " "
                                 elif seg_type == "forward":
-                                    forward_id = seg_data.get("id")
-                                    if forward_id:
-                                        texts = await self._extract_forward_text(event, forward_id)
+                                    fid = seg_data.get("id")
+                                    if fid:
+                                        texts = await self._extract_forward_text(event, fid)
                                         ref_text += " ".join(texts) + " "
+                                elif seg_type == "json":
+                                    json_str = seg_data.get("data")
+                                    if json_str:
+                                        try:
+                                            import json
+                                            data = json.loads(json_str)
+                                            news = data.get("meta", {}).get("detail", {}).get("news", [])
+                                            for n in news:
+                                                if "text" in n:
+                                                    ref_text += n["text"] + " "
+                                        except:
+                                            pass
                         elif isinstance(original_message, str):
                             ref_text = original_message
                         
@@ -211,22 +223,60 @@ class MagnetPreviewer(Star):
         """提取合并转发消息中的文本内容"""
         extracted_texts = []
         try:
-            # 尝试获取适配器调用 API
             bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
             if bot:
                 forward_data = await bot.api.call_action('get_forward_msg', id=forward_id)
                 if forward_data and "messages" in forward_data:
                     for msg_node in forward_data["messages"]:
-                        content = msg_node.get("message") or msg_node.get("content", [])
-                        if isinstance(content, list):
-                            for segment in content:
-                                if segment.get("type") == "text":
-                                    extracted_texts.append(segment.get("data", {}).get("text", ""))
-                        elif isinstance(content, str):
-                            extracted_texts.append(content)
+                        # 递归提取单个节点的文本
+                        node_text = self._parse_node_content(msg_node)
+                        if node_text:
+                            extracted_texts.append(node_text)
+                else:
+                    logger.warning(f"合并转发数据中未找到 messages 字段: {forward_data}")
         except Exception as e:
             logger.warning(f"提取转发消息失败: {e}")
         return extracted_texts
+
+    def _parse_node_content(self, node: Dict[str, Any]) -> str:
+        """解析单个消息节点的文本内容，支持多种结构"""
+        # 优先从 message 或 content 字段获取内容
+        content = node.get("message") or node.get("content")
+        if not content:
+            return ""
+
+        # 1. 如果内容是字符串（可能是 JSON 序列化后的）
+        if isinstance(content, str):
+            import json
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    content = parsed
+            except (json.JSONDecodeError, TypeError):
+                return content
+
+        # 2. 如果内容是列表（标准的 MessageChain 结构）
+        text_parts = []
+        if isinstance(content, list):
+            for segment in content:
+                if isinstance(segment, dict):
+                    seg_type = segment.get("type")
+                    seg_data = segment.get("data", {})
+                    if seg_type == "text":
+                        text_parts.append(seg_data.get("text", ""))
+                    elif seg_type == "forward":
+                        # 处理嵌套转发
+                        nested_id = seg_data.get("id")
+                        if nested_id:
+                            pass
+                        nested_content = seg_data.get("content")
+                        if isinstance(nested_content, list):
+                            for n_node in nested_content:
+                                text_parts.append(self._parse_node_content(n_node))
+                elif isinstance(segment, str):
+                    text_parts.append(segment)
+        
+        return "".join(text_parts).strip()
 
     async def _process_and_show_magnets(self, event: AstrMessageEvent, links: List[str], custom_blur: float = None) -> AsyncGenerator[Any, Any]:
         """统一的磁链处理和展示流程"""
