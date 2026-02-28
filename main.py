@@ -46,6 +46,7 @@ class MagnetPreviewer(Star):
         self._magnet_regex = re.compile(r"magnet:\?xt=urn:btih:([a-zA-Z0-9]{32,40})", re.IGNORECASE)
         self._command_regex = re.compile(r"text='(.*?)'")
         self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b", re.IGNORECASE)
+        self._url_regex = re.compile(r"\b(?:https?://|www\.)[^\s<>'\"`]+", re.IGNORECASE)
         
     async def terminate(self):
         logger.info("磁链预览插件已终止")
@@ -158,7 +159,7 @@ class MagnetPreviewer(Star):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    @filter.regex(r"(?s).*?(magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}|[a-fA-F0-9]{40}).*")
+    @filter.regex(r"(?is).*?magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}.*")
     async def handle_magnet_regex(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
         """正则触发的自动解析"""
         # 检查自动解析开关
@@ -174,7 +175,8 @@ class MagnetPreviewer(Star):
             return
 
         plain_text = event.message_str
-        links = self._extract_all_magnets(plain_text)[:self.max_magnet_count]
+        # 自动解析模式仅处理显式磁链，避免误判普通 40 位哈希字符串
+        links = self._extract_all_magnets(plain_text, include_bare_hash=False)[:self.max_magnet_count]
         
         if not links:
             return
@@ -198,10 +200,11 @@ class MagnetPreviewer(Star):
         gid = event.get_group_id()
         return str(gid) in self.group_whitelist
 
-    def _extract_all_magnets(self, text: str) -> List[str]:
+    def _extract_all_magnets(self, text: str, include_bare_hash: bool = True) -> List[str]:
         """从文本中提取所有磁力链接（去重）"""
         links = []
         seen_hashes = set()
+        url_spans = [m.span() for m in self._url_regex.finditer(text)]
         
         # 1. 提取磁力链接
         for match in self._magnet_regex.finditer(text):
@@ -210,14 +213,25 @@ class MagnetPreviewer(Star):
                 links.append(f"magnet:?xt=urn:btih:{info_hash}")
                 seen_hashes.add(info_hash)
             
-        # 2. 提取裸哈希
-        for match in self._hash_regex.finditer(text):
-            info_hash = match.group(1).upper()
-            if info_hash not in seen_hashes:
-                links.append(f"magnet:?xt=urn:btih:{info_hash}")
-                seen_hashes.add(info_hash)
+        # 2. 提取裸哈希（可选），并过滤 URL 内部片段，避免误识别网站链接
+        if include_bare_hash:
+            for match in self._hash_regex.finditer(text):
+                if self._is_span_in_url(match.span(), url_spans):
+                    continue
+                info_hash = match.group(1).upper()
+                if info_hash not in seen_hashes:
+                    links.append(f"magnet:?xt=urn:btih:{info_hash}")
+                    seen_hashes.add(info_hash)
         
         return links
+
+    def _is_span_in_url(self, span: Tuple[int, int], url_spans: List[Tuple[int, int]]) -> bool:
+        """判断匹配片段是否位于 URL 内"""
+        start, end = span
+        for url_start, url_end in url_spans:
+            if start < url_end and end > url_start:
+                return True
+        return False
 
     async def _extract_forward_text(self, event: AstrMessageEvent, forward_id: str) -> List[str]:
         """提取合并转发消息中的文本内容"""
