@@ -26,7 +26,7 @@ FILE_TYPE_MAP = {
     'unknown': '❓ 其他'
 }
 
-@register("astrbot_plugin_magnet_preview", "Foolllll", "磁链预览助手", "1.2.2")
+
 class MagnetPreviewer(Star):
     
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -38,7 +38,7 @@ class MagnetPreviewer(Star):
         self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
         self.auto_parse = config.get("auto_parse", True)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
-        self.group_whitelist = [str(gid) for gid in config.get("group_whitelist", [])]
+        self.session_whitelist = [str(sid) for sid in config.get("session_whitelist", [])]
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
@@ -47,6 +47,7 @@ class MagnetPreviewer(Star):
         self._command_regex = re.compile(r"text='(.*?)'")
         self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b", re.IGNORECASE)
         self._url_regex = re.compile(r"\b(?:https?://|www\.)[^\s<>'\"`]+", re.IGNORECASE)
+
         
     async def terminate(self):
         logger.info("磁链预览插件已终止")
@@ -162,16 +163,15 @@ class MagnetPreviewer(Star):
     @filter.regex(r"(?is).*?magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}.*")
     async def handle_magnet_regex(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
         """正则触发的自动解析"""
+        if (not event.is_private_chat()) and event.is_at_or_wake_command:
+            return
+        
         # 检查自动解析开关
         if not self.auto_parse:
             return
 
         # 检查白名单
         if not self._is_allowed(event):
-            return
-
-        # 如果消息是以指令开头的，则不触发正则逻辑，避免重复触发
-        if event.message_str.startswith(("磁链", "磁力", "/磁链", "/磁力")):
             return
 
         plain_text = event.message_str
@@ -188,17 +188,32 @@ class MagnetPreviewer(Star):
             yield result
 
     def _is_allowed(self, event: AstrMessageEvent) -> bool:
-        """检查当前场景是否允许运行。私聊场景不受群组白名单限制"""
-        # 如果是私聊场景，直接允许
-        if not event.get_group_id():
+        """检查当前会话是否允许运行。会话级白名单支持群号和私聊用户 ID。"""
+        # 如果没有设置白名单，则全部会话都允许
+        if not self.session_whitelist:
             return True
-            
-        # 如果没有设置白名单，则所有群组都允许
-        if not self.group_whitelist:
-            return True
-        
-        gid = event.get_group_id()
-        return str(gid) in self.group_whitelist
+
+        session_id = event.get_group_id() or event.get_sender_id()
+        return str(session_id) in self.session_whitelist
+
+
+    def _get_platform_name(self, event: AstrMessageEvent) -> str:
+        """获取平台名，优先事件方法，失败时回退 unified_msg_origin 前缀。"""
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name:
+                return str(platform_name)
+        except Exception:
+            pass
+
+        umo = getattr(event, "unified_msg_origin", "") or ""
+        if ":" in umo:
+            return umo.split(":", 1)[0]
+        return "unknown"
+
+    def _is_aiocqhttp_platform(self, event: AstrMessageEvent) -> bool:
+        """当前是否为 QQ(aiocqhttp) 平台。"""
+        return self._get_platform_name(event) == "aiocqhttp"
 
     def _extract_all_magnets(self, text: str, include_bare_hash: bool = True) -> List[str]:
         """从文本中提取所有磁力链接（去重）"""
@@ -337,6 +352,23 @@ class MagnetPreviewer(Star):
 
     async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]], custom_blur: float = None) -> AsyncGenerator[Any, Any]:
         """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""
+        if not self._is_aiocqhttp_platform(event):
+            platform_name = self._get_platform_name(event)
+            logger.info(f"当前平台({platform_name})不支持合并转发，已降级为文本输出。")
+            texts = []
+            for i, (infos, screenshots_urls) in enumerate(all_results):
+                res_text = self._format_text_result(infos, screenshots_urls)
+                if len(all_results) > 1:
+                    res_text = f"磁链预览 #{i+1}\n\n" + res_text
+                texts.append(res_text)
+            combined = ""
+            if texts:
+                combined = "\n\n".join(texts)
+            for part_text in self._split_text_by_length(combined, 4000):
+                if part_text:
+                    yield event.plain_result(part_text)
+            return
+
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
         
