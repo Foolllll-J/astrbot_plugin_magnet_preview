@@ -58,5 +58,11 @@
       "step": 1
     },
     "hint": "默认为 1，即只解析第一个磁链。设置大于 1 时，会将多个解析结果合并发送。"
+  },
+  "mask_media_for_telegram": {
+    "description": "预览图启用遮罩",
+    "type": "bool",
+    "default": false,
+    "hint": "开启此选项会对图片应用遮罩处理，关闭则发送原图。此配置仅影响 Telegram 平台。"
   }
 }

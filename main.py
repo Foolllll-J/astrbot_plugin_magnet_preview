@@ -38,6 +38,7 @@ class MagnetPreviewer(Star):
         self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
         self.auto_parse = config.get("auto_parse", True)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
+        self.mask_media_for_telegram = config.get("mask_media_for_telegram", False)
         self.session_whitelist = [str(sid) for sid in config.get("session_whitelist", [])]
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
@@ -53,7 +54,7 @@ class MagnetPreviewer(Star):
         logger.info("磁链预览插件已终止")
         await super().terminate()
 
-    @filter.command("磁链", alias=["磁力"])
+    @filter.command("磁链", alias=["磁力", "bt"])
     async def magnet_cmd(self, event: AstrMessageEvent):
         """磁链解析指令，支持引用消息解析和直接输入"""
         if not self._is_allowed(event):
@@ -79,49 +80,68 @@ class MagnetPreviewer(Star):
             target_text = arg 
             
         reply_id = None
+        reply_text = ""
+
+        # 检查是否有引用消息
         for seg in event.message_obj.message:
             if isinstance(seg, Comp.Reply):
                 reply_id = seg.id
+                # 优先使用 Reply 组件的 message_str 字段
+                if hasattr(seg, 'message_str') and seg.message_str:
+                    reply_text = seg.message_str
+                # 如果 message_str 为空，尝试使用 text 字段
+                elif hasattr(seg, 'text') and seg.text:
+                    reply_text = seg.text
+                # 如果都为空，尝试从 chain 中提取
+                elif hasattr(seg, 'chain') and seg.chain:
+                    for chain_seg in seg.chain:
+                        if isinstance(chain_seg, Comp.Plain):
+                            reply_text += chain_seg.text
                 break
 
         if reply_id:
-            try:
-                bot = getattr(event, 'bot', None) or getattr(event.bot_event, 'client', None)
-                if bot:
-                    res = await bot.api.call_action('get_msg', message_id=reply_id)
-                    if res and 'message' in res:
-                        original_message = res['message']
-                        ref_text = ""
-                        if isinstance(original_message, list):
-                            for segment in original_message:
-                                seg_type = segment.get("type")
-                                seg_data = segment.get("data", {})
-                                if seg_type == "text":
-                                    ref_text += seg_data.get("text", "") + " "
-                                elif seg_type == "forward":
-                                    fid = seg_data.get("id")
-                                    if fid:
-                                        texts = await self._extract_forward_text(event, fid)
-                                        ref_text += " ".join(texts) + " "
-                                elif seg_type == "json":
-                                    json_str = seg_data.get("data")
-                                    if json_str:
-                                        try:
-                                            import json
-                                            data = json.loads(json_str)
-                                            news = data.get("meta", {}).get("detail", {}).get("news", [])
-                                            for n in news:
-                                                if "text" in n:
-                                                    ref_text += n["text"] + " "
-                                        except:
-                                            pass
-                        elif isinstance(original_message, str):
-                            ref_text = original_message
-                        
-                        if ref_text.strip():
-                            target_text = ref_text
-            except Exception as e:
-                logger.warning(f"获取引用消息失败: {e}")
+            # 如果 Reply 组件有文本内容，直接使用
+            if reply_text:
+                target_text = reply_text
+            else:
+                # 回退到通过 API 获取引用消息（QQ 平台）
+                try:
+                    bot = getattr(event, 'bot', None)
+                    if bot:
+                        res = await bot.api.call_action('get_msg', message_id=reply_id)
+                        if res and 'message' in res:
+                            original_message = res['message']
+                            ref_text = ""
+                            if isinstance(original_message, list):
+                                for segment in original_message:
+                                    seg_type = segment.get("type")
+                                    seg_data = segment.get("data", {})
+                                    if seg_type == "text":
+                                        ref_text += seg_data.get("text", "") + " "
+                                    elif seg_type == "forward":
+                                        fid = seg_data.get("id")
+                                        if fid:
+                                            texts = await self._extract_forward_text(event, fid)
+                                            ref_text += " ".join(texts) + " "
+                                    elif seg_type == "json":
+                                        json_str = seg_data.get("data")
+                                        if json_str:
+                                            try:
+                                                import json
+                                                data = json.loads(json_str)
+                                                news = data.get("meta", {}).get("detail", {}).get("news", [])
+                                                for n in news:
+                                                    if "text" in n:
+                                                        ref_text += n["text"] + " "
+                                            except:
+                                                pass
+                            elif isinstance(original_message, str):
+                                ref_text = original_message
+
+                            if ref_text.strip():
+                                target_text = ref_text
+                except Exception as e:
+                    logger.warning(f"获取引用消息失败: {e}")
         
         if not target_text and not is_all_numeric:
             target_text = arg
@@ -159,13 +179,16 @@ class MagnetPreviewer(Star):
         async for result in self._process_and_show_magnets(event, links_to_process, custom_blur_level):
             yield result
 
+        # 指令触发后阻止事件传播
+        yield event.stop_event()
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     @filter.regex(r"(?is).*?magnet:\?xt=urn:btih:[a-zA-Z0-9]{32,40}.*")
     async def handle_magnet_regex(self, event: AstrMessageEvent) -> AsyncGenerator[Any, Any]:
         """正则触发的自动解析"""
         if (not event.is_private_chat()) and event.is_at_or_wake_command:
             return
-        
+
         # 检查自动解析开关
         if not self.auto_parse:
             return
@@ -177,15 +200,18 @@ class MagnetPreviewer(Star):
         plain_text = event.message_str
         # 自动解析模式仅处理显式磁链，避免误判普通 40 位哈希字符串
         links = self._extract_all_magnets(plain_text, include_bare_hash=False)[:self.max_magnet_count]
-        
+
         if not links:
             return
 
-        # 自动触发时贴表情
+        # 自动触发时贴表情（仅QQ平台）
         await self._set_emoji(event, 339)
 
         async for result in self._process_and_show_magnets(event, links):
             yield result
+
+        # 阻止事件继续传播，避免 LLM 等插件重复处理
+        yield event.stop_event()
 
     def _is_allowed(self, event: AstrMessageEvent) -> bool:
         """检查当前会话是否允许运行。会话级白名单支持群号和私聊用户 ID。"""
@@ -194,7 +220,12 @@ class MagnetPreviewer(Star):
             return True
 
         session_id = event.get_group_id() or event.get_sender_id()
-        return str(session_id) in self.session_whitelist
+        if not session_id:
+            return False
+
+        # 处理 Telegram 群组 ID（可能包含 # 后缀）
+        session_id = str(session_id).split('#')[0]
+        return session_id in self.session_whitelist
 
 
     def _get_platform_name(self, event: AstrMessageEvent) -> str:
@@ -214,6 +245,61 @@ class MagnetPreviewer(Star):
     def _is_aiocqhttp_platform(self, event: AstrMessageEvent) -> bool:
         """当前是否为 QQ(aiocqhttp) 平台。"""
         return self._get_platform_name(event) == "aiocqhttp"
+
+    def _is_telegram_platform(self, event: AstrMessageEvent) -> bool:
+        """当前是否为 Telegram 平台"""
+        return self._get_platform_name(event) == "telegram"
+
+    async def _send_telegram_album(
+        self,
+        event: AstrMessageEvent,
+        infos: List[str],
+        image_bytes_list: List[bytes],
+        has_spoiler: bool = False,
+    ):
+        """使用 Telegram Bot API 发送相册形式的消息"""
+        try:
+            from telegram import InputMediaPhoto
+            from telegram.ext import ExtBot
+
+            tg_bot = getattr(event, 'client', None)
+            if not tg_bot or not isinstance(tg_bot, ExtBot):
+                logger.warning("无法获取 Telegram Bot 实例，回退到普通发送方式")
+                return False
+
+            chat_id = event.get_group_id() or event.get_sender_id()
+            # 处理 Telegram 群组 ID（可能包含 # 后缀）
+            chat_id = str(chat_id).split('#')[0]
+
+            # 构建媒体组，使用 Telegram 原生 spoiler 功能
+            media_group = [InputMediaPhoto(media=img_bytes, has_spoiler=has_spoiler) for img_bytes in image_bytes_list]
+
+            if not media_group:
+                return False
+
+            # 第一张图片带完整文本作为说明
+            caption = "\n".join(infos)
+            if len(caption) > 1024:
+                caption = caption[:1020] + "..."
+            media_group[0] = InputMediaPhoto(
+                media=media_group[0].media,
+                caption=caption,
+                has_spoiler=has_spoiler
+            )
+
+            # 发送媒体组
+            await tg_bot.send_media_group(
+                chat_id=chat_id,
+                media=media_group
+            )
+            return True
+
+        except ImportError:
+            logger.warning("未安装 telegram 库，无法使用相册功能")
+            return False
+        except Exception as e:
+            logger.error(f"发送 Telegram 相册失败: {e}")
+            return False
 
     def _extract_all_magnets(self, text: str, include_bare_hash: bool = True) -> List[str]:
         """从文本中提取所有磁力链接（去重）"""
@@ -323,10 +409,16 @@ class MagnetPreviewer(Star):
         if not all_results:
             return
 
+        # Telegram 平台始终使用图片模式，忽略 output_as_link 配置
+        if self._is_telegram_platform(event):
+            async for result in self._generate_multi_forward_result(event, all_results, custom_blur):
+                yield result
+            return
+
         if len(all_results) == 1:
             infos, screenshots_urls = all_results[0]
             force_image_mode = custom_blur is not None
-            
+
             if (self.output_as_link and not force_image_mode) or not screenshots_urls:
                 yield event.plain_result(self._format_text_result(infos, screenshots_urls))
             else:
@@ -337,22 +429,59 @@ class MagnetPreviewer(Star):
                 yield result
 
     async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int):
-        """给消息贴表情"""
+        """给消息贴表情（仅支持QQ平台）"""
         if not self.enable_emoji_reaction:
             return
 
+        if not self._is_aiocqhttp_platform(event):
+            return
+
         try:
-            await event.bot.set_msg_emoji_like( 
-                message_id=event.message_obj.message_id, 
-                emoji_id=emoji_id, 
-                set=True, 
-            ) 
+            bot = getattr(event, 'bot', None)
+            if not bot:
+                logger.debug("无法获取 bot 实例")
+                return
+            await bot.set_msg_emoji_like(
+                message_id=event.message_obj.message_id,
+                emoji_id=emoji_id,
+                set=True,
+            )
         except Exception as e:
             logger.debug(f"贴表情失败: {e}")
 
     async def _generate_multi_forward_result(self, event: AstrMessageEvent, all_results: List[Tuple[List[str], List[str]]], custom_blur: float = None) -> AsyncGenerator[Any, Any]:
         """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""
-        if not self._is_aiocqhttp_platform(event):
+        is_telegram = self._is_telegram_platform(event)
+
+        if is_telegram:
+            all_infos = []
+            all_image_bytes = []
+
+            for i, (infos, screenshots_urls) in enumerate(all_results):
+                if len(all_results) > 1:
+                    all_infos.append(f"🔗 磁链预览 #{i+1}")
+                all_infos.extend(infos)
+
+                if screenshots_urls:
+                    image_bytes_list = await self._download_screenshots(screenshots_urls)
+                    all_image_bytes.extend(image_bytes_list)
+
+            if all_image_bytes:
+                # 使用 Telegram 原生 spoiler 功能
+                has_spoiler = self.mask_media_for_telegram
+                success = await self._send_telegram_album(event, all_infos, all_image_bytes, has_spoiler)
+                if success:
+                    return
+
+            # 如果相册发送失败，降级为文本输出
+            combined_text = "\n".join(all_infos)
+            for part_text in self._split_text_by_length(combined_text, 4000):
+                if part_text:
+                    yield event.plain_result(part_text)
+            return
+
+        # 非 Telegram 且非 QQ 的平台降级为文本输出
+        if not self._is_telegram_platform(event) and not self._is_aiocqhttp_platform(event):
             platform_name = self._get_platform_name(event)
             logger.info(f"当前平台({platform_name})不支持合并转发，已降级为文本输出。")
             texts = []
@@ -371,7 +500,7 @@ class MagnetPreviewer(Star):
 
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
-        
+
         # 如果指定了 custom_blur，强制使用图片模式
         force_image_mode = custom_blur is not None
 
@@ -381,7 +510,7 @@ class MagnetPreviewer(Star):
                 res_text = self._format_text_result(infos, screenshots_urls)
                 if len(all_results) > 1:
                     res_text = f"🔗 磁链预览 #{i+1}\n\n" + res_text
-                
+
                 split_texts = self._split_text_by_length(res_text, 4000)
                 for part_text in split_texts:
                     node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
@@ -389,7 +518,7 @@ class MagnetPreviewer(Star):
             else:
                 # 2. 图片模式：下载图片并分节点展示
                 image_bytes_list = await self._download_screenshots(screenshots_urls)
-                
+
                 # 准备文本信息
                 display_infos = list(infos)
                 if len(all_results) > 1:
