@@ -500,18 +500,20 @@ class MagnetPreviewer(Star):
 
         sender_id = event.get_self_id()
         forward_nodes: List[Node] = []
+        link_forward_nodes: List[Node] = []
 
         # 如果指定了 custom_blur，强制使用图片模式
         force_image_mode = custom_blur is not None
 
         for i, (infos, screenshots_urls) in enumerate(all_results):
+            res_text = self._format_result_with_index(i, infos, screenshots_urls, len(all_results))
+            split_texts = self._split_text_by_length(res_text, 4000)
+            for part_text in split_texts:
+                node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
+                link_forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
+
             if self.output_as_link and not force_image_mode:
                 # 1. 直链模式：直接将包含链接的文本作为节点
-                res_text = self._format_text_result(infos, screenshots_urls)
-                if len(all_results) > 1:
-                    res_text = f"🔗 磁链预览 #{i+1}\n\n" + res_text
-
-                split_texts = self._split_text_by_length(res_text, 4000)
                 for part_text in split_texts:
                     node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
                     forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
@@ -555,6 +557,24 @@ class MagnetPreviewer(Star):
             return
 
         merged_forward_message = Nodes(nodes=forward_nodes)
+        if self._is_aiocqhttp_platform(event) and not (self.output_as_link and not force_image_mode):
+            try:
+                await event.send(MessageChain([merged_forward_message]))
+                return
+            except Exception as e:
+                logger.warning(f"图片合并转发失败，尝试回退到直链模式: {e}")
+                if link_forward_nodes:
+                    try:
+                        await event.send(MessageChain([Nodes(nodes=link_forward_nodes)]))
+                        return
+                    except Exception as retry_error:
+                        logger.error(f"直链合并转发重试失败: {retry_error}")
+                combined = self._join_text_results(all_results)
+                for part_text in self._split_text_by_length(combined, 4000):
+                    if part_text:
+                        yield event.plain_result(part_text)
+                return
+
         yield event.chain_result([merged_forward_message])
 
     def _split_text_by_length(self, text: str, max_length: int = 4000) -> List[str]:
@@ -594,6 +614,27 @@ class MagnetPreviewer(Star):
                 message += f"\n- 截图 {i+1}: {url}"
                 
         return message
+
+    def _format_result_with_index(
+        self,
+        index: int,
+        infos: List[str],
+        screenshots_urls: List[str],
+        total_results: int,
+    ) -> str:
+        """为多结果场景补齐统一标题，便于文本/直链回退复用。"""
+        result_text = self._format_text_result(infos, screenshots_urls)
+        if total_results > 1:
+            result_text = f"🔗 磁链预览 #{index+1}\n\n" + result_text
+        return result_text
+
+    def _join_text_results(self, all_results: List[Tuple[List[str], List[str]]]) -> str:
+        """将多条结果拼接为纯文本，供最终兜底发送。"""
+        texts = []
+        total_results = len(all_results)
+        for index, (infos, screenshots_urls) in enumerate(all_results):
+            texts.append(self._format_result_with_index(index, infos, screenshots_urls, total_results))
+        return "\n\n".join(texts)
 
     async def _fetch_magnet_info(self, magnet_link: str) -> Dict | None:
         """异步调用Whatslink API获取磁力信息"""
