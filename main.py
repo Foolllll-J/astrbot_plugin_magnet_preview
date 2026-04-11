@@ -505,75 +505,63 @@ class MagnetPreviewer(Star):
         # 如果指定了 custom_blur，强制使用图片模式
         force_image_mode = custom_blur is not None
 
-        for i, (infos, screenshots_urls) in enumerate(all_results):
-            res_text = self._format_result_with_index(i, infos, screenshots_urls, len(all_results))
-            split_texts = self._split_text_by_length(res_text, 4000)
-            for part_text in split_texts:
-                node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
-                link_forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
-
-            if self.output_as_link and not force_image_mode:
-                # 1. 直链模式：直接将包含链接的文本作为节点
+        try:
+            for i, (infos, screenshots_urls) in enumerate(all_results):
+                res_text = self._format_result_with_index(i, infos, screenshots_urls, len(all_results))
+                split_texts = self._split_text_by_length(res_text, 4000)
                 for part_text in split_texts:
                     node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
-                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
-            else:
-                # 2. 图片模式：下载图片并分节点展示
-                image_bytes_list = await self._download_screenshots(screenshots_urls)
+                    link_forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
 
-                # 准备文本信息
-                display_infos = list(infos)
-                if len(all_results) > 1:
-                    display_infos.insert(0, f"🔗 磁链预览 #{i+1}")
+                if self.output_as_link and not force_image_mode:
+                    # 1. 直链模式：直接将包含链接的文本作为节点
+                    for part_text in split_texts:
+                        node_name = f"磁力预览信息 ({i+1})" if len(all_results) > 1 else "磁力预览信息"
+                        forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
+                else:
+                    # 2. 图片模式：下载图片并分节点展示
+                    image_bytes_list = await self._download_screenshots(screenshots_urls)
 
-                if screenshots_urls:
-                    display_infos.append(f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):")
-
-                info_text = "\n".join(display_infos)
-                split_texts = self._split_text_by_length(info_text, 4000)
-
-                # 添加文本节点
-                for j, part_text in enumerate(split_texts):
-                    node_name = "磁力预览信息"
+                    display_infos = list(infos)
                     if len(all_results) > 1:
-                        node_name += f" ({i+1})"
-                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
+                        display_infos.insert(0, f"🔗 磁链预览 #{i+1}")
 
-                # 添加图片节点
-                # 确定使用的模糊度
-                blur_level = custom_blur if custom_blur is not None else self.cover_mosaic_level
+                    if screenshots_urls:
+                        display_infos.append(f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):")
 
-                for img_bytes in image_bytes_list:
-                    if blur_level is not None:
-                        img_bytes = self._apply_mosaic(img_bytes, blur_level)
-                    image_component = Comp.Image.fromBytes(img_bytes)
-                    node_name = "预览截图"
-                    if len(all_results) > 1:
-                        node_name += f" ({i+1})"
-                    forward_nodes.append(Node(uin=sender_id, name=node_name, content=[image_component]))
+                    info_text = "\n".join(display_infos)
+                    split_texts = self._split_text_by_length(info_text, 4000)
 
-        if not forward_nodes:
-            yield event.plain_result("⚠️ 未能生成有效的预览内容。")
-            return
+                    for j, part_text in enumerate(split_texts):
+                        node_name = "磁力预览信息"
+                        if len(all_results) > 1:
+                            node_name += f" ({i+1})"
+                        forward_nodes.append(Node(uin=sender_id, name=node_name, content=[Plain(text=part_text)]))
 
-        merged_forward_message = Nodes(nodes=forward_nodes)
-        if self._is_aiocqhttp_platform(event) and not (self.output_as_link and not force_image_mode):
-            try:
+                    blur_level = custom_blur if custom_blur is not None else self.cover_mosaic_level
+
+                    for img_bytes in image_bytes_list:
+                        if blur_level is not None:
+                            img_bytes = self._apply_mosaic(img_bytes, blur_level)
+                        image_component = Comp.Image.fromBytes(img_bytes)
+                        node_name = "预览截图"
+                        if len(all_results) > 1:
+                            node_name += f" ({i+1})"
+                        forward_nodes.append(Node(uin=sender_id, name=node_name, content=[image_component]))
+
+            if not forward_nodes:
+                yield event.plain_result("⚠️ 未能生成有效的预览内容。")
+                return
+
+            merged_forward_message = Nodes(nodes=forward_nodes)
+            if self._is_aiocqhttp_platform(event) and not (self.output_as_link and not force_image_mode):
                 await event.send(MessageChain([merged_forward_message]))
                 return
-            except Exception as e:
-                logger.warning(f"图片合并转发失败，尝试回退到直链模式: {e}")
-                if link_forward_nodes:
-                    try:
-                        await event.send(MessageChain([Nodes(nodes=link_forward_nodes)]))
-                        return
-                    except Exception as retry_error:
-                        logger.error(f"直链合并转发重试失败: {retry_error}")
-                combined = self._join_text_results(all_results)
-                for part_text in self._split_text_by_length(combined, 4000):
-                    if part_text:
-                        yield event.plain_result(part_text)
-                return
+        except Exception as e:
+            logger.warning(f"图片模式发送失败，尝试回退到直链模式: {e}")
+            async for result in self._yield_link_fallback_results(event, link_forward_nodes, all_results):
+                yield result
+            return
 
         yield event.chain_result([merged_forward_message])
 
@@ -635,6 +623,25 @@ class MagnetPreviewer(Star):
         for index, (infos, screenshots_urls) in enumerate(all_results):
             texts.append(self._format_result_with_index(index, infos, screenshots_urls, total_results))
         return "\n\n".join(texts)
+
+    async def _yield_link_fallback_results(
+        self,
+        event: AstrMessageEvent,
+        link_forward_nodes: List[Node],
+        all_results: List[Tuple[List[str], List[str]]],
+    ) -> AsyncGenerator[Any, Any]:
+        """统一处理直链重试和纯文本兜底。"""
+        if link_forward_nodes:
+            try:
+                await event.send(MessageChain([Nodes(nodes=link_forward_nodes)]))
+                return
+            except Exception as retry_error:
+                logger.error(f"直链合并转发重试失败: {retry_error}")
+
+        combined = self._join_text_results(all_results)
+        for part_text in self._split_text_by_length(combined, 4000):
+            if part_text:
+                yield event.plain_result(part_text)
 
     async def _fetch_magnet_info(self, magnet_link: str) -> Dict | None:
         """异步调用Whatslink API获取磁力信息"""
