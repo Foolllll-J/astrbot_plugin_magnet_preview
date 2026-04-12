@@ -399,8 +399,10 @@ class MagnetPreviewer(Star):
         for link in links:
             data = await self._fetch_magnet_info(link)
             
-            if not data or data.get('error'):
+            if not data or data.get('error') or self._is_unresolved_parse_result(data, link):
                 error_msg = data.get('name', '未知错误') if data else 'API无响应'
+                if data and self._is_unresolved_parse_result(data, link):
+                    error_msg = "未解析到有效资源信息，可能是无效磁链"
                 all_results.append(([f"⚠️ 解析失败 ({link}): {error_msg.split('contact')[0].strip()}"], []))
             else:
                 infos, screenshots_urls = self._sort_infos_and_get_urls(data)
@@ -664,6 +666,40 @@ class MagnetPreviewer(Star):
         except Exception as e:
             logger.error(f"An unexpected error occurred during fetch: {e}")
             return None
+
+    def _is_unresolved_parse_result(self, info: Dict | None, magnet_link: str) -> bool:
+        """识别上游接口未真正解析出资源信息时返回的占位结果。"""
+        if not isinstance(info, dict):
+            return False
+
+        magnet_hash_match = self._magnet_regex.search(magnet_link or "")
+        if not magnet_hash_match:
+            return False
+
+        magnet_hash = magnet_hash_match.group(1).upper()
+        name = str(info.get("name", "") or "").strip().upper()
+        file_type = str(info.get("file_type", "unknown") or "unknown").strip().lower()
+
+        try:
+            size = int(info.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        try:
+            count = int(info.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            count = 0
+
+        screenshots = info.get("screenshots")
+        has_screenshots = isinstance(screenshots, list) and len(screenshots) > 0
+
+        return (
+            name == magnet_hash
+            and file_type in {"unknown", "other"}
+            and size <= 0
+            and count <= 1
+            and not has_screenshots
+        )
 
     async def _download_screenshots(self, screenshots_urls: List[str]) -> List[bytes]:
         """下载截图并返回原始字节列表"""
