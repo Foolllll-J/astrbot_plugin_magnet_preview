@@ -574,10 +574,10 @@ class MagnetPreviewer(Star):
     def _sort_infos_and_get_urls(self, info: dict) -> Tuple[List[str], List[str]]:
         file_type = str(info.get('file_type', 'unknown')).lower()
         base_info = [
-            f"🔍 解析结果：\r",
-            f"📝 名称：{info.get('name', '未知')}\r",
-            f"📦 类型：{FILE_TYPE_MAP.get(file_type, FILE_TYPE_MAP['unknown'])}\r",
-            f"📏 大小：{self._format_file_size(info.get('size', 0))}\r",
+            f"🔍 解析结果：",
+            f"📝 名称：{info.get('name', '未知')}",
+            f"📦 类型：{FILE_TYPE_MAP.get(file_type, FILE_TYPE_MAP['unknown'])}",
+            f"📏 大小：{self._format_file_size(info.get('size', 0))}",
             f"📚 包含文件：{info.get('count', 0)}个"
         ]
 
