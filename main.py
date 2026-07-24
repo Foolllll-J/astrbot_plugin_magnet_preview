@@ -1,6 +1,8 @@
 import re
 import math
+import json
 import asyncio
+import time
 import aiohttp
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Tuple
@@ -14,6 +16,7 @@ from astrbot.api.message_components import Plain, Node, Nodes
 
 DEFAULT_WHATSLINK_URL = "https://whatslink.info"
 DEFAULT_TIMEOUT = 10
+MAX_FORWARD_DEPTH = 5
 
 FILE_TYPE_MAP = {
     "folder": "📁 文件夹",
@@ -60,6 +63,7 @@ class MagnetPreviewer(Star):
         self._url_regex = re.compile(
             r"\b(?:https?://|www\.)[^\s<>'\"`]+", re.IGNORECASE
         )
+        self._link_cache: dict = {}
 
     async def terminate(self):
         logger.info("磁链预览插件已终止")
@@ -140,8 +144,6 @@ class MagnetPreviewer(Star):
                                         json_str = seg_data.get("data")
                                         if json_str:
                                             try:
-                                                import json
-
                                                 data = json.loads(json_str)
                                                 news = (
                                                     data.get("meta", {})
@@ -164,7 +166,19 @@ class MagnetPreviewer(Star):
         if not target_text and not is_all_numeric:
             target_text = arg
 
-        all_links = self._extract_all_magnets(target_text)
+        if reply_id is not None:
+            cache_key = (event.unified_msg_origin, reply_id)
+            cached = self._link_cache.get(cache_key)
+            if cached is not None and time.time() - cached[0] < 300:
+                logger.debug(
+                    f"[磁链缓存] 命中引用消息 {reply_id}，共 {len(cached[1])} 条磁链"
+                )
+                all_links = cached[1]
+            else:
+                all_links = self._extract_all_magnets(target_text)
+                self._link_cache[cache_key] = (time.time(), all_links)
+        else:
+            all_links = self._extract_all_magnets(target_text)
 
         if not all_links:
             yield event.plain_result(
@@ -374,9 +388,11 @@ class MagnetPreviewer(Star):
         return False
 
     async def _extract_forward_text(
-        self, event: AstrMessageEvent, forward_id: str
+        self, event: AstrMessageEvent, forward_id: str, depth: int = 0
     ) -> List[str]:
         """提取合并转发消息中的文本内容"""
+        if depth > MAX_FORWARD_DEPTH:
+            return ["[已达到最大转发嵌套深度，后续内容省略]"]
         extracted_texts = []
         try:
             bot = getattr(event, "bot", None) or getattr(
@@ -388,7 +404,20 @@ class MagnetPreviewer(Star):
                 )
                 if forward_data and "messages" in forward_data:
                     for msg_node in forward_data["messages"]:
-                        # 递归提取单个节点的文本
+                        content = msg_node.get("message") or msg_node.get("content", [])
+                        if (
+                            isinstance(content, list)
+                            and len(content) == 1
+                            and isinstance(content[0], dict)
+                            and content[0].get("type") == "forward"
+                        ):
+                            nested_id = content[0].get("data", {}).get("id")
+                            if nested_id:
+                                nested_texts = await self._extract_forward_text(
+                                    event, nested_id, depth + 1
+                                )
+                                extracted_texts.extend(nested_texts)
+                                continue
                         node_text = self._parse_node_content(msg_node)
                         if node_text:
                             extracted_texts.append(node_text)
@@ -409,8 +438,6 @@ class MagnetPreviewer(Star):
 
         # 1. 如果内容是字符串（可能是 JSON 序列化后的）
         if isinstance(content, str):
-            import json
-
             try:
                 parsed = json.loads(content)
                 if isinstance(parsed, list):
@@ -570,11 +597,11 @@ class MagnetPreviewer(Star):
             for i, (infos, screenshots_urls) in enumerate(all_results):
                 res_text = self._format_text_result(infos, screenshots_urls)
                 if len(all_results) > 1:
-                    res_text = f"磁链预览 #{i + 1}\n\n" + res_text
+                    res_text = f"磁链预览 #{i + 1}\n\u200b\n" + res_text
                 texts.append(res_text)
             combined = ""
             if texts:
-                combined = "\n\n".join(texts)
+                combined = "\n\u200b\n".join(texts)
             for part_text in self._split_text_by_length(combined, 4000):
                 if part_text:
                     yield event.plain_result(part_text)
@@ -723,7 +750,7 @@ class MagnetPreviewer(Star):
         message = "\n".join(infos)
 
         if screenshots_urls:
-            message += "\n\n📸 预览截图链接："
+            message += "\n\u200b\n📸 预览截图链接："
             for i, url in enumerate(screenshots_urls):
                 message += f"\n- 截图 {i + 1}: {url}"
 
@@ -739,7 +766,7 @@ class MagnetPreviewer(Star):
         """为多结果场景补齐统一标题，便于文本/直链回退复用。"""
         result_text = self._format_text_result(infos, screenshots_urls)
         if total_results > 1:
-            result_text = f"🔗 磁链预览 #{index + 1}\n\n" + result_text
+            result_text = f"🔗 磁链预览 #{index + 1}\n\u200b\n" + result_text
         return result_text
 
     def _join_text_results(self, all_results: List[Tuple[List[str], List[str]]]) -> str:
@@ -752,7 +779,7 @@ class MagnetPreviewer(Star):
                     index, infos, screenshots_urls, total_results
                 )
             )
-        return "\n\n".join(texts)
+        return "\n\u200b\n".join(texts)
 
     async def _yield_link_fallback_results(
         self,
