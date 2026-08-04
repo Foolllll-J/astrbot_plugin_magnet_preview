@@ -46,6 +46,7 @@ class MagnetPreviewer(Star):
         self.session_whitelist = [
             str(sid) for sid in config.get("session_whitelist", [])
         ]
+        self.loose_match = config.get("loose_match", False)
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
@@ -222,7 +223,7 @@ class MagnetPreviewer(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     @filter.regex(
-        r"(?is).*?(?:magnet:\?\s*xt\s*=\s*urn\s*:\s*btih\s*:\s*[a-zA-Z0-9]{32,40}|ed2k://\s*\|file\|\s*[^|]+\s*\|\s*\d+\s*\|\s*[a-fA-F0-9]{32}\s*\|\s*/).*"
+        r"(?is).*?(?:magnet:\?\s*xt\s*=\s*urn\s*:\s*btih\s*:\s*[a-zA-Z0-9]{32,40}|ed2k://\s*\|file\|\s*[^|]+\s*\|\s*\d+\s*\|\s*[a-fA-F0-9]{32}\s*\|\s*/|\b[a-fA-F0-9]{40}\b).*"
     )
     async def handle_magnet_regex(
         self, event: AstrMessageEvent
@@ -240,8 +241,8 @@ class MagnetPreviewer(Star):
             return
 
         plain_text = event.message_str
-        # 自动解析模式仅处理显式磁链，避免误判普通 40 位哈希字符串
-        links = self._extract_all_magnets(plain_text, include_bare_hash=False)[
+        # 自动解析默认仅处理显式磁链；宽松匹配模式下也匹配裸 40 位哈希
+        links = self._extract_all_magnets(plain_text, include_bare_hash=self.loose_match)[
             : self.max_magnet_count
         ]
 
@@ -787,8 +788,8 @@ class MagnetPreviewer(Star):
         link_forward_nodes: List[Node],
         all_results: List[Tuple[List[str], List[str]]],
     ) -> AsyncGenerator[Any, Any]:
-        """统一处理直链重试和纯文本兜底。"""
-        if link_forward_nodes:
+        """统一处理直链重试和纯文本兜底。单条结果时直接降级为纯文本，不再伪造合并转发。"""
+        if link_forward_nodes and len(all_results) > 1:
             try:
                 await event.send(MessageChain([Nodes(nodes=link_forward_nodes)]))
                 return

@@ -9,44 +9,22 @@
     "hint": "留空表示全部会话可用。群聊填群号，私聊填用户 ID。"
   },
   "auto_parse": {
-    "description": "自动解析消息中的磁链",
+    "description": "自动解析磁链",
     "type": "bool",
     "default": true,
     "hint": "开启时，发送包含磁链的消息将自动触发预览。关闭后仅指令触发。"
   },
+  "loose_match": {
+    "description": "宽松匹配模式",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，仅含 40 位哈希的消息也会被自动识别并尝试解析。"
+  },
   "enable_emoji_reaction": {
-    "description": "是否开启表情回应",
+    "description": "自动解析时贴表情回应",
     "type": "bool",
     "default": true,
     "hint": "开启后，插件在处理磁链时会给原消息贴表情以示响应。"
-  },
-  "output_as_link": {
-    "description": "以直链形式发送截图",
-    "type": "bool",
-    "default": false,
-    "hint": "关闭时，插件将以合并转发形式发送截图。"
-  },
-  "max_screenshot_count": {
-    "description": "预览截图的最大数量(0-5)",
-    "type": "int",
-    "default": 3,
-    "slider": {
-      "min": 0,
-      "max": 5,
-      "step": 1
-    },
-    "hint": "设置为 0 则不输出任何截图信息。"
-  },
-  "cover_mosaic_level": {
-    "description": "预览图模糊程度(0.0-1.0)",
-    "type": "float",
-    "default": 0.3,
-    "slider": {
-      "min": 0.0,
-      "max": 1.0,
-      "step": 0.01
-    },
-    "hint": "设置为 0 则禁用模糊，值越大模糊越强。"
   },
   "max_magnet_count": {
     "description": "单次消息最多解析磁链数量",
@@ -58,6 +36,34 @@
       "step": 1
     },
     "hint": "默认为 1，即只解析第一个磁链。设置大于 1 时，会将多个解析结果合并发送。"
+  },
+  "output_as_link": {
+    "description": "以直链形式发送预览图",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时，插件将以合并转发形式发送预览图。"
+  },
+  "max_screenshot_count": {
+    "description": "预览图的最大数量(0-5)",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 0,
+      "max": 5,
+      "step": 1
+    },
+    "hint": "设置为 0 则不输出任何预览图信息。"
+  },
+  "cover_mosaic_level": {
+    "description": "预览图模糊程度(0.0-1.0)",
+    "type": "float",
+    "default": 0.3,
+    "slider": {
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    "hint": "设置为 0 则禁用模糊，值越大模糊越强。"
   },
   "mask_media_for_telegram": {
     "description": "预览图启用遮罩",
