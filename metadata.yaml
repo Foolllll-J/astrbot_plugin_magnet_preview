@@ -1,7 +1,7 @@
 name: astrbot_plugin_magnet_preview
 display_name: 磁链预览助手
 desc: 自动捕获或手动指定磁力链接，解析并发送详细信息与预览图片。
-version: v1.2.9
+version: v1.3.0
 author: Foolllll
 author_url: https://github.com/Foolllll-J
 repo: https://github.com/Foolllll-J/astrbot_plugin_magnet_preview

@@ -1,74 +1,102 @@
 {
-  "session_whitelist": {
-    "description": "会话白名单",
-    "type": "list",
+  "trigger_settings": {
+    "description": "触发设置",
+    "type": "object",
+    "hint": "控制插件的触发方式和解析数量。",
     "items": {
-      "type": "string"
-    },
-    "default": [],
-    "hint": "留空表示全部会话可用。群聊填群号，私聊填用户 ID。"
+      "session_whitelist": {
+        "description": "会话白名单",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "留空表示全部会话可用。群聊填群号，私聊填用户 ID。"
+      },
+      "auto_parse": {
+        "description": "自动解析磁链",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时，发送包含磁链的消息将自动触发预览。关闭后仅指令触发。"
+      },
+      "loose_match": {
+        "description": "宽松匹配模式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，仅含 40 位哈希的消息也会被自动识别并尝试解析。"
+      },
+      "enable_emoji_reaction": {
+        "description": "自动解析时贴表情回应",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，处理磁链时给原消息贴表情。仅 QQ(aiocqhttp) 平台有效。"
+      },
+      "max_magnet_count": {
+        "description": "单次消息最多解析磁链数量",
+        "type": "int",
+        "default": 1,
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "hint": "默认为 1，只解析第一个磁链。设置大于 1 时合并展示解析结果。"
+      }
+    }
   },
-  "auto_parse": {
-    "description": "自动解析磁链",
-    "type": "bool",
-    "default": true,
-    "hint": "开启时，发送包含磁链的消息将自动触发预览。关闭后仅指令触发。"
-  },
-  "loose_match": {
-    "description": "宽松匹配模式",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，仅含 40 位哈希的消息也会被自动识别并尝试解析。"
-  },
-  "enable_emoji_reaction": {
-    "description": "自动解析时贴表情回应",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，插件在处理磁链时会给原消息贴表情以示响应。"
-  },
-  "max_magnet_count": {
-    "description": "单次消息最多解析磁链数量",
-    "type": "int",
-    "default": 1,
-    "slider": {
-      "min": 1,
-      "max": 10,
-      "step": 1
-    },
-    "hint": "默认为 1，即只解析第一个磁链。设置大于 1 时，会将多个解析结果合并发送。"
-  },
-  "output_as_link": {
-    "description": "以直链形式发送预览图",
-    "type": "bool",
-    "default": false,
-    "hint": "关闭时，插件将以合并转发形式发送预览图。"
-  },
-  "max_screenshot_count": {
-    "description": "预览图的最大数量(0-5)",
-    "type": "int",
-    "default": 3,
-    "slider": {
-      "min": 0,
-      "max": 5,
-      "step": 1
-    },
-    "hint": "设置为 0 则不输出任何预览图信息。"
-  },
-  "cover_mosaic_level": {
-    "description": "预览图模糊程度(0.0-1.0)",
-    "type": "float",
-    "default": 0.3,
-    "slider": {
-      "min": 0.0,
-      "max": 1.0,
-      "step": 0.01
-    },
-    "hint": "设置为 0 则禁用模糊，值越大模糊越强。"
-  },
-  "mask_media_for_telegram": {
-    "description": "预览图启用遮罩",
-    "type": "bool",
-    "default": false,
-    "hint": "开启此选项会对图片应用遮罩处理，关闭则发送原图。此配置仅影响 Telegram 平台。"
+  "output_settings": {
+    "description": "输出设置",
+    "type": "object",
+    "hint": "控制预览图的输出方式和显示效果。",
+    "items": {
+      "output_mode": {
+        "description": "预览输出模式",
+        "type": "string",
+        "options": [
+          "image",
+          "link"
+        ],
+        "labels": [
+          "图片模式",
+          "直链模式"
+        ],
+        "default": "image",
+        "hint": "图片模式发送预览图，直链模式发送预览图链接。"
+      },
+      "max_screenshot_count": {
+        "description": "预览图的最大数量",
+        "type": "int",
+        "default": 3,
+        "slider": {
+          "min": 0,
+          "max": 5,
+          "step": 1
+        },
+        "hint": "设置为 0 则不发送预览图。"
+      },
+      "cover_mosaic_level": {
+        "description": "预览图模糊程度",
+        "type": "float",
+        "default": 0.3,
+        "slider": {
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.01
+        },
+        "hint": "设置为 0 则禁用模糊，值越大模糊越强。Telegram 使用原生遮罩，不受此配置影响。"
+      },
+      "qq_image_as_forward": {
+        "description": "QQ 图片合并转发",
+        "type": "bool",
+        "default": true,
+        "hint": "开启时，QQ 图片模式使用合并转发；关闭时直接发送预览图。"
+      },
+      "mask_media_for_telegram": {
+        "description": "Telegram 图片启用遮罩",
+        "type": "bool",
+        "default": false,
+        "hint": "开启时使用 Telegram 原生遮罩，关闭则发送原图。"
+      }
+    }
   }
 }

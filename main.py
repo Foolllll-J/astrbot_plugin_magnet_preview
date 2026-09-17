@@ -34,19 +34,31 @@ class MagnetPreviewer(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
 
-        self.output_as_link = config.get("output_as_link", False)
+        trigger_conf = config.get("trigger_settings") or {}
+        output_conf = config.get("output_settings") or {}
+
+        output_mode = output_conf.get("output_mode", "image")
+        if output_mode not in ("image", "link"):
+            output_mode = "image"
+        self.output_mode = output_mode
+        self.qq_image_as_forward = output_conf.get("qq_image_as_forward", True)
         self.max_screenshots = max(
-            0, min(5, int(config.get("max_screenshot_count", 3)))
+            0, min(5, int(output_conf.get("max_screenshot_count", 3)))
         )
-        self.cover_mosaic_level = float(config.get("cover_mosaic_level", 0.3))
-        self.max_magnet_count = max(1, min(10, int(config.get("max_magnet_count", 1))))
-        self.auto_parse = config.get("auto_parse", True)
-        self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
-        self.mask_media_for_telegram = config.get("mask_media_for_telegram", False)
+        self.cover_mosaic_level = float(output_conf.get("cover_mosaic_level", 0.3))
+        self.mask_media_for_telegram = output_conf.get(
+            "mask_media_for_telegram", False
+        )
+
+        self.max_magnet_count = max(
+            1, min(10, int(trigger_conf.get("max_magnet_count", 1)))
+        )
+        self.auto_parse = trigger_conf.get("auto_parse", True)
+        self.enable_emoji_reaction = trigger_conf.get("enable_emoji_reaction", True)
         self.session_whitelist = [
-            str(sid) for sid in config.get("session_whitelist", [])
+            str(sid) for sid in trigger_conf.get("session_whitelist", [])
         ]
-        self.loose_match = config.get("loose_match", False)
+        self.loose_match = trigger_conf.get("loose_match", False)
 
         self.whatslink_url = DEFAULT_WHATSLINK_URL
         self.api_url = f"{self.whatslink_url}/api/v1/link"
@@ -300,8 +312,8 @@ class MagnetPreviewer(Star):
         infos: List[str],
         image_bytes_list: List[bytes],
         has_spoiler: bool = False,
-    ):
-        """使用 Telegram Bot API 发送相册形式的消息"""
+    ) -> bool:
+        """使用 Telegram Bot API 发送相册形式的消息，返回是否发送成功。"""
         try:
             from telegram import InputMediaPhoto
             from telegram.ext import ExtBot
@@ -500,32 +512,10 @@ class MagnetPreviewer(Star):
         if not all_results:
             return
 
-        # Telegram 平台始终使用图片模式，忽略 output_as_link 配置
-        if self._is_telegram_platform(event):
-            async for result in self._generate_multi_forward_result(
-                event, all_results, custom_blur
-            ):
-                yield result
-            return
-
-        if len(all_results) == 1:
-            infos, screenshots_urls = all_results[0]
-            force_image_mode = custom_blur is not None
-
-            if (self.output_as_link and not force_image_mode) or not screenshots_urls:
-                yield event.plain_result(
-                    self._format_text_result(infos, screenshots_urls)
-                )
-            else:
-                async for result in self._generate_multi_forward_result(
-                    event, all_results, custom_blur
-                ):
-                    yield result
-        else:
-            async for result in self._generate_multi_forward_result(
-                event, all_results, custom_blur
-            ):
-                yield result
+        async for result in self._generate_preview_result(
+            event, all_results, custom_blur
+        ):
+            yield result
 
     async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int):
         """给消息贴表情（仅支持QQ平台）"""
@@ -548,176 +538,172 @@ class MagnetPreviewer(Star):
         except Exception as e:
             logger.debug(f"贴表情失败: {e}")
 
-    async def _generate_multi_forward_result(
+    async def _generate_preview_result(
         self,
         event: AstrMessageEvent,
         all_results: List[Tuple[List[str], List[str]]],
         custom_blur: float = None,
     ) -> AsyncGenerator[Any, Any]:
-        """生成并发送合并转发消息，支持多个磁链结果（包含图片模式和直链模式）"""
+        """生成并发送预览结果，支持多个磁链。
+
+        - 直链模式：所有平台统一发送文本 + 截图直链，不发送图片，无回退。
+        - 图片模式：Telegram 走原生相册（不模糊，用原生遮罩）；QQ 走合并转发
+          （可用 qq_image_as_forward 关闭，发送失败时退化为单条消息）；
+          其余平台将文本与图片合并为一条消息直接发送。
+        - 图片模式任何环节失败（拿不到图 / 处理异常 / 相册失败）统一回退到直链模式。
+        """
         is_telegram = self._is_telegram_platform(event)
+        is_qq = self._is_aiocqhttp_platform(event)
 
-        if is_telegram:
-            all_infos = []
-            all_image_bytes = []
-
-            for i, (infos, screenshots_urls) in enumerate(all_results):
-                if len(all_results) > 1:
-                    all_infos.append(f"🔗 磁链预览 #{i + 1}")
-                all_infos.extend(infos)
-
-                if screenshots_urls:
-                    image_bytes_list = await self._download_screenshots(
-                        screenshots_urls
-                    )
-                    all_image_bytes.extend(image_bytes_list)
-
-            if all_image_bytes:
-                # 使用 Telegram 原生 spoiler 功能
-                has_spoiler = self.mask_media_for_telegram
-                success = await self._send_telegram_album(
-                    event, all_infos, all_image_bytes, has_spoiler
-                )
-                if success:
-                    return
-
-            # 如果相册发送失败，降级为文本输出
-            combined_text = "\n".join(all_infos)
-            for part_text in self._split_text_by_length(combined_text, 4000):
-                if part_text:
-                    yield event.plain_result(part_text)
-            return
-
-        # 非 Telegram 且非 QQ 的平台降级为文本输出
-        if not self._is_telegram_platform(event) and not self._is_aiocqhttp_platform(
-            event
-        ):
-            platform_name = self._get_platform_name(event)
-            logger.info(f"当前平台({platform_name})不支持合并转发，已降级为文本输出。")
-            texts = []
-            for i, (infos, screenshots_urls) in enumerate(all_results):
-                res_text = self._format_text_result(infos, screenshots_urls)
-                if len(all_results) > 1:
-                    res_text = f"磁链预览 #{i + 1}\n\u200b\n" + res_text
-                texts.append(res_text)
-            combined = ""
-            if texts:
-                combined = "\n\u200b\n".join(texts)
-            for part_text in self._split_text_by_length(combined, 4000):
-                if part_text:
-                    yield event.plain_result(part_text)
-            return
-
-        sender_id = event.get_self_id()
-        forward_nodes: List[Node] = []
-        link_forward_nodes: List[Node] = []
-
-        # 如果指定了 custom_blur，强制使用图片模式
+        # 指定了 custom_blur 时强制使用图片模式
         force_image_mode = custom_blur is not None
+        is_image_mode = self.output_mode == "image" or force_image_mode
 
-        try:
-            for i, (infos, screenshots_urls) in enumerate(all_results):
-                res_text = self._format_result_with_index(
-                    i, infos, screenshots_urls, len(all_results)
-                )
-                split_texts = self._split_text_by_length(res_text, 4000)
-                for part_text in split_texts:
-                    node_name = (
-                        f"磁力预览信息 ({i + 1})"
-                        if len(all_results) > 1
-                        else "磁力预览信息"
-                    )
-                    link_forward_nodes.append(
-                        Node(
-                            uin=sender_id,
-                            name=node_name,
-                            content=[Plain(text=part_text)],
-                        )
-                    )
-
-                if self.output_as_link and not force_image_mode:
-                    # 1. 直链模式：直接将包含链接的文本作为节点
-                    for part_text in split_texts:
-                        node_name = (
-                            f"磁力预览信息 ({i + 1})"
-                            if len(all_results) > 1
-                            else "磁力预览信息"
-                        )
-                        forward_nodes.append(
-                            Node(
-                                uin=sender_id,
-                                name=node_name,
-                                content=[Plain(text=part_text)],
-                            )
-                        )
-                else:
-                    # 2. 图片模式：下载图片并分节点展示
-                    image_bytes_list = await self._download_screenshots(
-                        screenshots_urls
-                    )
-
-                    display_infos = list(infos)
-                    if len(all_results) > 1:
-                        display_infos.insert(0, f"🔗 磁链预览 #{i + 1}")
-
-                    if screenshots_urls:
-                        display_infos.append(
-                            f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):"
-                        )
-
-                    info_text = "\n".join(display_infos)
-                    split_texts = self._split_text_by_length(info_text, 4000)
-
-                    for j, part_text in enumerate(split_texts):
-                        node_name = "磁力预览信息"
-                        if len(all_results) > 1:
-                            node_name += f" ({i + 1})"
-                        forward_nodes.append(
-                            Node(
-                                uin=sender_id,
-                                name=node_name,
-                                content=[Plain(text=part_text)],
-                            )
-                        )
-
-                    blur_level = (
-                        custom_blur
-                        if custom_blur is not None
-                        else self.cover_mosaic_level
-                    )
-
-                    for img_bytes in image_bytes_list:
-                        if blur_level is not None:
-                            img_bytes = self._apply_mosaic(img_bytes, blur_level)
-                        image_component = Comp.Image.fromBytes(img_bytes)
-                        node_name = "预览截图"
-                        if len(all_results) > 1:
-                            node_name += f" ({i + 1})"
-                        forward_nodes.append(
-                            Node(
-                                uin=sender_id, name=node_name, content=[image_component]
-                            )
-                        )
-
-            if not forward_nodes:
-                yield event.plain_result("⚠️ 未能生成有效的预览内容。")
-                return
-
-            merged_forward_message = Nodes(nodes=forward_nodes)
-            if self._is_aiocqhttp_platform(event) and not (
-                self.output_as_link and not force_image_mode
-            ):
-                await event.send(MessageChain([merged_forward_message]))
-                return
-        except Exception as e:
-            logger.warning(f"图片模式发送失败，尝试回退到直链模式: {e}")
-            async for result in self._yield_link_fallback_results(
-                event, link_forward_nodes, all_results
-            ):
+        if not is_image_mode:
+            async for result in self._generate_link_result(event, all_results):
                 yield result
             return
 
-        yield event.chain_result([merged_forward_message])
+        processed: List[Tuple[int, str, List[Any]]] = []
+
+        try:
+            if is_telegram:
+                # Telegram 使用原生相册，不做模糊处理（改用原生遮罩）
+                if await self._send_telegram_album_result(event, all_results):
+                    return
+            else:
+                processed = await self._prepare_image_results(all_results, custom_blur)
+        except Exception as e:
+            logger.warning(f"图片模式处理失败，回退为直链输出: {e}")
+            processed = []
+
+        if processed and any(images for _, _, images in processed):
+            # QQ 特殊处理：默认以合并转发承载图片，发送失败则退化为单条消息
+            if is_qq and self.qq_image_as_forward:
+                nodes = self._build_image_nodes(event, processed, len(all_results))
+                try:
+                    await event.send(MessageChain([Nodes(nodes=nodes)]))
+                    return
+                except Exception as e:
+                    logger.warning(f"图片合并转发发送失败，回退为单条消息: {e}")
+
+            yield event.chain_result(self._build_image_chain(processed))
+            return
+
+        # 统一回退：图片模式失败一律回退到直链模式
+        async for result in self._generate_link_result(event, all_results):
+            yield result
+
+    async def _generate_link_result(
+        self,
+        event: AstrMessageEvent,
+        all_results: List[Tuple[List[str], List[str]]],
+    ) -> AsyncGenerator[Any, Any]:
+        """直链模式：所有平台统一发送文本 + 截图直链，不发送图片。"""
+        for part_text in self._split_text_by_length(
+            self._join_text_results(all_results), 4000
+        ):
+            if part_text:
+                yield event.plain_result(part_text)
+
+    async def _send_telegram_album_result(
+        self,
+        event: AstrMessageEvent,
+        all_results: List[Tuple[List[str], List[str]]],
+    ) -> bool:
+        """Telegram：使用原生相册发送预览图，可选原生遮罩。返回是否已成功发送。"""
+        all_infos = []
+        all_image_bytes = []
+
+        for i, (infos, screenshots_urls) in enumerate(all_results):
+            if len(all_results) > 1:
+                all_infos.append(f"🔗 磁链预览 #{i + 1}")
+            all_infos.extend(infos)
+
+            if screenshots_urls:
+                image_bytes_list = await self._download_screenshots(screenshots_urls)
+                all_image_bytes.extend(image_bytes_list)
+
+        if not all_image_bytes:
+            return False
+
+        return await self._send_telegram_album(
+            event, all_infos, all_image_bytes, self.mask_media_for_telegram
+        )
+
+    async def _prepare_image_results(
+        self,
+        all_results: List[Tuple[List[str], List[str]]],
+        custom_blur: float = None,
+    ) -> List[Tuple[int, str, List[Any]]]:
+        """下载并处理全部预览图（含模糊），返回 [(序号, 展示文本, 图片组件)]。"""
+        processed: List[Tuple[int, str, List[Any]]] = []
+
+        for i, (infos, screenshots_urls) in enumerate(all_results):
+            image_bytes_list = await self._download_screenshots(screenshots_urls)
+
+            display_infos = list(infos)
+            if len(all_results) > 1:
+                display_infos.insert(0, f"🔗 磁链预览 #{i + 1}")
+            if screenshots_urls:
+                display_infos.append(
+                    f"\n📸 预览截图 (成功 {len(image_bytes_list)}/{len(screenshots_urls)} 张):"
+                )
+
+            blur_level = (
+                custom_blur if custom_blur is not None else self.cover_mosaic_level
+            )
+            image_components = []
+            for img_bytes in image_bytes_list:
+                if blur_level is not None:
+                    img_bytes = self._apply_mosaic(img_bytes, blur_level)
+                image_components.append(Comp.Image.fromBytes(img_bytes))
+
+            processed.append((i, "\n".join(display_infos), image_components))
+
+        return processed
+
+    def _build_image_nodes(
+        self,
+        event: AstrMessageEvent,
+        processed: List[Tuple[int, str, List[Any]]],
+        total: int,
+    ) -> List[Node]:
+        """构建图片模式的合并转发节点（文本节点 + 图片节点）。"""
+        sender_id = event.get_self_id()
+        nodes: List[Node] = []
+
+        for i, info_text, image_components in processed:
+            for part_text in self._split_text_by_length(info_text, 4000):
+                nodes.append(
+                    Node(
+                        uin=sender_id,
+                        name=f"磁力预览信息 ({i + 1})" if total > 1 else "磁力预览信息",
+                        content=[Plain(text=part_text)],
+                    )
+                )
+
+            for image_component in image_components:
+                nodes.append(
+                    Node(
+                        uin=sender_id,
+                        name=f"预览截图 ({i + 1})" if total > 1 else "预览截图",
+                        content=[image_component],
+                    )
+                )
+
+        return nodes
+
+    @staticmethod
+    def _build_image_chain(processed: List[Tuple[int, str, List[Any]]]) -> List[Any]:
+        """将文本与图片合并为一条消息链。"""
+        chain: List[Any] = []
+        texts = [info_text for _, info_text, _ in processed]
+        if texts:
+            chain.append(Plain(text="\n\u200b\n".join(texts)))
+        for _, _, image_components in processed:
+            chain.extend(image_components)
+        return chain
 
     def _split_text_by_length(self, text: str, max_length: int = 4000) -> List[str]:
         """将文本按指定长度分割成一个字符串列表"""
@@ -764,7 +750,7 @@ class MagnetPreviewer(Star):
         screenshots_urls: List[str],
         total_results: int,
     ) -> str:
-        """为多结果场景补齐统一标题，便于文本/直链回退复用。"""
+        """为多结果场景补齐统一标题，供直链模式复用。"""
         result_text = self._format_text_result(infos, screenshots_urls)
         if total_results > 1:
             result_text = f"🔗 磁链预览 #{index + 1}\n\u200b\n" + result_text
@@ -781,25 +767,6 @@ class MagnetPreviewer(Star):
                 )
             )
         return "\n\u200b\n".join(texts)
-
-    async def _yield_link_fallback_results(
-        self,
-        event: AstrMessageEvent,
-        link_forward_nodes: List[Node],
-        all_results: List[Tuple[List[str], List[str]]],
-    ) -> AsyncGenerator[Any, Any]:
-        """统一处理直链重试和纯文本兜底。单条结果时直接降级为纯文本，不再伪造合并转发。"""
-        if link_forward_nodes and len(all_results) > 1:
-            try:
-                await event.send(MessageChain([Nodes(nodes=link_forward_nodes)]))
-                return
-            except Exception as retry_error:
-                logger.error(f"直链合并转发重试失败: {retry_error}")
-
-        combined = self._join_text_results(all_results)
-        for part_text in self._split_text_by_length(combined, 4000):
-            if part_text:
-                yield event.plain_result(part_text)
 
     async def _fetch_magnet_info(self, magnet_link: str) -> Dict | None:
         """异步调用Whatslink API获取磁力信息"""
