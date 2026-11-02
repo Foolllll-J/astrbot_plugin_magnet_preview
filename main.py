@@ -3,6 +3,7 @@ import math
 import json
 import asyncio
 import time
+import unicodedata
 import aiohttp
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Tuple
@@ -17,6 +18,48 @@ from astrbot.api.message_components import Plain, Node, Nodes
 DEFAULT_WHATSLINK_URL = "https://whatslink.info"
 DEFAULT_TIMEOUT = 10
 MAX_FORWARD_DEPTH = 5
+
+_HEX40_RE = re.compile(r"[0-9A-Fa-f]{40}")
+_BASE32_RE = re.compile(r"[A-Za-z2-7]{32}")
+
+# 40 位哈希中，仅以下字符可能由输入错误产生，其余字符不作替换
+_HASH_CHAR_REPAIR = str.maketrans(
+    {"O": "0", "o": "0", "I": "1", "i": "1", "L": "1", "l": "1"}
+)
+
+# 单条哈希最多替换 3 个字符，超出则视为普通文本，避免生成错误哈希
+MAX_HASH_CHAR_REPAIRS = 3
+
+# 粗筛只匹配磁链关键字与全角形式，精确解析由 _extract_all_magnets 完成
+# 不加首尾 .*：filter.regex 内部使用 re.search，多余的 .* 会增加长消息的匹配耗时
+_COARSE_TRIGGER = (
+    r"(?i)(?:"
+    r"[mｍ][aａ][gｇ][nｎ][eｅ][tｔ]"
+    r"|ed2k"
+    r"|[0-9A-Za-z０-９Ａ-Ｚａ-ｚ]{32,40}"
+    r")"
+)
+
+_API_ERROR_MARKER_RE = re.compile(r"(?i)please\s+contact|contact\s+us")
+
+LINK_CACHE_TTL = 300
+INFO_CACHE_TTL = 600
+CACHE_MAX_ENTRIES = 128
+
+
+def _canonical_info_hash(token: str) -> str | None:
+    """将字符串转换为大写 info hash，非合法哈希返回 None"""
+    token = token.strip()
+    if _HEX40_RE.fullmatch(token) or _BASE32_RE.fullmatch(token):
+        return token.upper()
+    # 仅对 40 位字符串做替换：base32 中 O/I/L 本身合法，替换会破坏原哈希
+    if len(token) == 40:
+        repaired = token.translate(_HASH_CHAR_REPAIR)
+        if _HEX40_RE.fullmatch(repaired):
+            changed = sum(1 for raw, fixed in zip(token, repaired) if raw != fixed)
+            if changed <= MAX_HASH_CHAR_REPAIRS:
+                return repaired.upper()
+    return None
 
 FILE_TYPE_MAP = {
     "folder": "📁 文件夹",
@@ -64,11 +107,13 @@ class MagnetPreviewer(Star):
         self.api_url = f"{self.whatslink_url}/api/v1/link"
 
         self._magnet_regex = re.compile(
-            r"magnet:\?\s*xt\s*=\s*urn\s*:\s*btih\s*:\s*([a-zA-Z0-9]{32,40})",
+            r"magnet:\?\s*xt\s*=\s*urn\s*:\s*btih\s*:\s*([0-9A-Za-z]{32,40})(?![0-9A-Za-z])",
             re.IGNORECASE,
         )
-        self._command_regex = re.compile(r"text='(.*?)'")
-        self._hash_regex = re.compile(r"\b([a-fA-F0-9]{40})\b", re.IGNORECASE)
+        # 使用 ASCII 前后断言代替 \b，避免相邻汉字导致匹配失败
+        self._hash_regex = re.compile(
+            r"(?<![0-9A-Za-z])([0-9A-Za-z]{32,40})(?![0-9A-Za-z])"
+        )
         self._ed2k_regex = re.compile(
             r"ed2k://\s*\|file\|\s*(.+?)\s*\|\s*(\d+)\s*\|\s*([a-fA-F0-9]{32})\s*\|\s*/",
             re.IGNORECASE,
@@ -77,6 +122,7 @@ class MagnetPreviewer(Star):
             r"\b(?:https?://|www\.)[^\s<>'\"`]+", re.IGNORECASE
         )
         self._link_cache: dict = {}
+        self._info_cache: dict = {}
 
     async def terminate(self):
         logger.info("磁链预览插件已终止")
@@ -182,13 +228,14 @@ class MagnetPreviewer(Star):
         if reply_id is not None:
             cache_key = (event.unified_msg_origin, reply_id)
             cached = self._link_cache.get(cache_key)
-            if cached is not None and time.time() - cached[0] < 300:
+            if cached is not None and time.time() - cached[0] < LINK_CACHE_TTL:
                 logger.debug(
                     f"[磁链缓存] 命中引用消息 {reply_id}，共 {len(cached[1])} 条磁链"
                 )
                 all_links = cached[1]
             else:
                 all_links = self._extract_all_magnets(target_text)
+                self._evict_oldest(self._link_cache)
                 self._link_cache[cache_key] = (time.time(), all_links)
         else:
             all_links = self._extract_all_magnets(target_text)
@@ -234,9 +281,7 @@ class MagnetPreviewer(Star):
         yield event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    @filter.regex(
-        r"(?is).*?(?:magnet:\?\s*xt\s*=\s*urn\s*:\s*btih\s*:\s*[a-zA-Z0-9]{32,40}|ed2k://\s*\|file\|\s*[^|]+\s*\|\s*\d+\s*\|\s*[a-fA-F0-9]{32}\s*\|\s*/|\b[a-fA-F0-9]{40}\b).*"
-    )
+    @filter.regex(_COARSE_TRIGGER)
     async def handle_magnet_regex(
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[Any, Any]:
@@ -359,6 +404,8 @@ class MagnetPreviewer(Star):
         self, text: str, include_bare_hash: bool = True
     ) -> List[str]:
         """从文本中提取所有磁力链接和 ed2k 链接（去重）"""
+        # 中文输入法可能输出全角 ? : = 与字母，NFKC 归一化为半角
+        text = unicodedata.normalize("NFKC", text)
         links = []
         seen_hashes = set()
         seen_ed2k = set()
@@ -366,8 +413,8 @@ class MagnetPreviewer(Star):
 
         # 1. 提取磁力链接
         for match in self._magnet_regex.finditer(text):
-            info_hash = match.group(1).upper()
-            if info_hash not in seen_hashes:
+            info_hash = _canonical_info_hash(match.group(1))
+            if info_hash and info_hash not in seen_hashes:
                 links.append(f"magnet:?xt=urn:btih:{info_hash}")
                 seen_hashes.add(info_hash)
 
@@ -376,8 +423,8 @@ class MagnetPreviewer(Star):
             for match in self._hash_regex.finditer(text):
                 if self._is_span_in_url(match.span(), url_spans):
                     continue
-                info_hash = match.group(1).upper()
-                if info_hash not in seen_hashes:
+                info_hash = _canonical_info_hash(match.group(1))
+                if info_hash and info_hash not in seen_hashes:
                     links.append(f"magnet:?xt=urn:btih:{info_hash}")
                     seen_hashes.add(info_hash)
 
@@ -486,21 +533,26 @@ class MagnetPreviewer(Star):
     ) -> AsyncGenerator[Any, Any]:
         """统一的磁链处理和展示流程"""
         all_results = []
-        for link in links:
-            data = await self._fetch_magnet_info(link)
+        # 共用一个 session 并发请求，gather 按 links 顺序返回结果
+        async with aiohttp.ClientSession() as session:
+            fetched = await asyncio.gather(
+                *(self._fetch_magnet_info(session, link) for link in links)
+            )
 
-            if (
-                not data
-                or data.get("error")
-                or self._is_unresolved_parse_result(data, link)
-            ):
-                error_msg = data.get("name", "未知错误") if data else "API无响应"
-                if data and self._is_unresolved_parse_result(data, link):
+        for link, data in zip(links, fetched):
+            unresolved = bool(data) and self._is_unresolved_parse_result(data, link)
+            has_error = isinstance(data, dict) and bool(data.get("error"))
+            if not data or unresolved or has_error:
+                if unresolved:
                     error_msg = "未解析到有效资源信息，可能是无效磁链"
+                elif isinstance(data, dict):
+                    error_msg = data.get("name", "未知错误")
+                else:
+                    error_msg = "API无响应"
                 all_results.append(
                     (
                         [
-                            f"⚠️ 解析失败 ({link}): {error_msg.split('contact')[0].strip()}"
+                            f"⚠️ 解析失败 ({link}): {self._clean_api_error(error_msg)}"
                         ],
                         [],
                     )
@@ -768,8 +820,14 @@ class MagnetPreviewer(Star):
             )
         return "\n\u200b\n".join(texts)
 
-    async def _fetch_magnet_info(self, magnet_link: str) -> Dict | None:
+    async def _fetch_magnet_info(
+        self, session: aiohttp.ClientSession, magnet_link: str
+    ) -> Dict | None:
         """异步调用Whatslink API获取磁力信息"""
+        cached = self._get_cached_info(magnet_link)
+        if cached is not None:
+            return cached
+
         params = {"url": magnet_link}
         headers = {
             "Accept": "application/json",
@@ -777,24 +835,58 @@ class MagnetPreviewer(Star):
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    self.api_url,
-                    params=params,
-                    headers=headers,
-                    ssl=False,
-                    timeout=DEFAULT_TIMEOUT,
-                ) as resp:
-                    if resp.status != 200:
-                        logger.error(f"API request failed with status: {resp.status}")
-                        return None
-                    return await resp.json()
+            async with session.get(
+                self.api_url,
+                params=params,
+                headers=headers,
+                timeout=DEFAULT_TIMEOUT,
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(f"API request failed with status: {resp.status}")
+                    return None
+                data = await resp.json()
         except aiohttp.ClientError as e:
             logger.error(f"Network error during API call: {e}")
             return None
         except Exception as e:
             logger.error(f"An unexpected error occurred during fetch: {e}")
             return None
+
+        if (
+            isinstance(data, dict)
+            and not data.get("error")
+            and not self._is_unresolved_parse_result(data, magnet_link)
+        ):
+            self._put_cached_info(magnet_link, data)
+        return data
+
+    def _get_cached_info(self, magnet_link: str) -> Dict | None:
+        cached = self._info_cache.get(magnet_link)
+        if not cached:
+            return None
+        if time.time() - cached[0] > INFO_CACHE_TTL:
+            self._info_cache.pop(magnet_link, None)
+            return None
+        return cached[1]
+
+    def _put_cached_info(self, magnet_link: str, data: Dict) -> None:
+        self._evict_oldest(self._info_cache)
+        self._info_cache[magnet_link] = (time.time(), data)
+
+    @staticmethod
+    def _evict_oldest(cache: dict) -> None:
+        """缓存达到上限时删除时间最早的条目，值格式为 (时间戳, 数据)"""
+        if len(cache) < CACHE_MAX_ENTRIES:
+            return
+        oldest = min(cache, key=lambda key: cache[key][0])
+        cache.pop(oldest, None)
+
+    @staticmethod
+    def _clean_api_error(error_msg: Any) -> str:
+        """去除上游报错末尾的联系方式，仅保留错误信息"""
+        text = " ".join(str(error_msg or "").split())
+        text = _API_ERROR_MARKER_RE.split(text, maxsplit=1)[0]
+        return text.strip(" ,;.。")[:200] or "未知错误"
 
     def _is_unresolved_parse_result(self, info: Dict | None, link: str) -> bool:
         """识别上游接口未真正解析出资源信息时返回的占位结果。"""
